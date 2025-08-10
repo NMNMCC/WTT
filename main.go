@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,9 +13,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -24,24 +27,190 @@ const (
 	stunServer = "stun:stun.l.google.com:19302"
 )
 
+// SignalingMessage represents a signaling message
+type SignalingMessage struct {
+	Type string                     `json:"type"`
+	SDP  *webrtc.SessionDescription `json:"sdp,omitempty"`
+	ICE  *webrtc.ICECandidate       `json:"ice,omitempty"`
+}
+
+// SignalingServer manages WebSocket connections for signaling
+type SignalingServer struct {
+	clients map[string]*websocket.Conn
+	mutex   sync.RWMutex
+	offers  map[string]*webrtc.SessionDescription
+	answers map[string]*webrtc.SessionDescription
+}
+
 func main() {
-	mode := flag.String("mode", "", "Mode to run in: 'server' or 'client'")
+	mode := flag.String("mode", "", "Mode to run in: 'server', 'client', or 'signaling'")
 	listenAddr := flag.String("listen", "localhost:25565", "Address to listen on (client mode)")
 	remoteAddr := flag.String("remote", "localhost:25565", "Remote address to connect to (server mode, e.g., Minecraft server)")
 	signalAddr := flag.String("signal", "http://localhost:8080", "Signaling server address")
+	signalPort := flag.String("signal-port", "8080", "Port for signaling server (signaling mode)")
 	flag.Parse()
 
 	if *mode == "" {
-		log.Fatal("Mode is required: -mode=server or -mode=client")
+		log.Fatal("Mode is required: -mode=server, -mode=client, or -mode=signaling")
 	}
 
 	switch *mode {
+	case "signaling":
+		runSignalingServer(*signalPort)
 	case "server":
 		runServerMode(*remoteAddr, *signalAddr)
 	case "client":
 		runClientMode(*listenAddr, *signalAddr)
 	default:
 		log.Fatalf("Unknown mode: %s", *mode)
+	}
+}
+
+// runSignalingServer runs the WebSocket-based signaling server
+func runSignalingServer(port string) {
+	log.Printf("Starting signaling server on port %s", port)
+	
+	server := &SignalingServer{
+		clients: make(map[string]*websocket.Conn),
+		offers:  make(map[string]*webrtc.SessionDescription),
+		answers: make(map[string]*webrtc.SessionDescription),
+	}
+
+	http.HandleFunc("/ws", server.handleWebSocket)
+	http.HandleFunc("/offer", server.handleHTTPOffer)
+	http.HandleFunc("/answer", server.handleHTTPAnswer)
+
+	log.Printf("Signaling server running on :%s", port)
+	log.Printf("WebSocket endpoint: ws://localhost:%s/ws", port)
+	log.Printf("HTTP endpoints: http://localhost:%s/offer, http://localhost:%s/answer", port, port)
+	
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatalf("Signaling server failed: %v", err)
+	}
+}
+
+// handleWebSocket handles WebSocket connections for real-time signaling
+func (s *SignalingServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OriginPatterns: []string{"*"},
+	})
+	if err != nil {
+		log.Printf("Failed to accept WebSocket connection: %v", err)
+		return
+	}
+	defer conn.Close(websocket.StatusInternalError, "Server error")
+
+	clientID := r.URL.Query().Get("id")
+	if clientID == "" {
+		clientID = fmt.Sprintf("client_%d", time.Now().UnixNano())
+	}
+
+	s.mutex.Lock()
+	s.clients[clientID] = conn
+	s.mutex.Unlock()
+
+	log.Printf("Client %s connected via WebSocket", clientID)
+
+	ctx := context.Background()
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			log.Printf("Client %s disconnected: %v", clientID, err)
+			break
+		}
+
+		var msg SignalingMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			log.Printf("Invalid message from %s: %v", clientID, err)
+			continue
+		}
+
+		log.Printf("Received from %s: %s", clientID, msg.Type)
+		s.handleSignalingMessage(ctx, clientID, &msg)
+	}
+
+	s.mutex.Lock()
+	delete(s.clients, clientID)
+	s.mutex.Unlock()
+}
+
+// handleSignalingMessage processes signaling messages
+func (s *SignalingServer) handleSignalingMessage(ctx context.Context, clientID string, msg *SignalingMessage) {
+	switch msg.Type {
+	case "offer":
+		if msg.SDP != nil {
+			s.mutex.Lock()
+			s.offers[clientID] = msg.SDP
+			s.mutex.Unlock()
+			log.Printf("Stored offer from %s", clientID)
+		}
+	case "answer":
+		if msg.SDP != nil {
+			s.mutex.Lock()
+			s.answers[clientID] = msg.SDP
+			s.mutex.Unlock()
+			log.Printf("Stored answer from %s", clientID)
+		}
+	}
+}
+
+// handleHTTPOffer handles HTTP-based offer posting (for backward compatibility)
+func (s *SignalingServer) handleHTTPOffer(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var offer webrtc.SessionDescription
+		if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		
+		s.mutex.Lock()
+		s.offers["http_client"] = &offer
+		s.mutex.Unlock()
+		
+		log.Println("Received offer via HTTP")
+		w.WriteHeader(http.StatusOK)
+	} else if r.Method == http.MethodGet {
+		s.mutex.RLock()
+		offer, exists := s.offers["http_client"]
+		s.mutex.RUnlock()
+		
+		if !exists {
+			http.Error(w, "No offer available", http.StatusNotFound)
+			return
+		}
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(offer)
+	}
+}
+
+// handleHTTPAnswer handles HTTP-based answer posting (for backward compatibility)
+func (s *SignalingServer) handleHTTPAnswer(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var answer webrtc.SessionDescription
+		if err := json.NewDecoder(r.Body).Decode(&answer); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		
+		s.mutex.Lock()
+		s.answers["http_client"] = &answer
+		s.mutex.Unlock()
+		
+		log.Println("Received answer via HTTP")
+		w.WriteHeader(http.StatusOK)
+	} else if r.Method == http.MethodGet {
+		s.mutex.RLock()
+		answer, exists := s.answers["http_client"]
+		s.mutex.RUnlock()
+		
+		if !exists {
+			http.Error(w, "No answer available", http.StatusNotFound)
+			return
+		}
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(answer)
 	}
 }
 
@@ -120,7 +289,8 @@ func handleServerConnection(tcpConn net.Conn, signalAddr string) {
 	}
 
 	// 发送 Offer 到信令服务器
-	if err := postSDP(signalAddr+"/offer", offer); err != nil {
+	offerURL := signalAddr + "/offer"
+	if err := postSDP(offerURL, offer); err != nil {
 		log.Printf("Error posting offer: %v", err)
 		peerConnection.Close()
 		return
@@ -128,7 +298,8 @@ func handleServerConnection(tcpConn net.Conn, signalAddr string) {
 	log.Println("Offer posted to signaling server.")
 
 	// 从信令服务器轮询 Answer
-	answer, err := pollForSDP(signalAddr + "/answer")
+	answerURL := signalAddr + "/answer"
+	answer, err := pollForSDP(answerURL)
 	if err != nil {
 		log.Printf("Error polling for answer: %v", err)
 		peerConnection.Close()
@@ -153,7 +324,8 @@ func runClientMode(listenAddr, signalAddr string) {
 	log.Printf("Starting in CLIENT mode. Listening on %s", listenAddr)
 
 	// 从信令服务器轮询 Offer
-	offer, err := pollForSDP(signalAddr + "/offer")
+	offerURL := signalAddr + "/offer"
+	offer, err := pollForSDP(offerURL)
 	if err != nil {
 		log.Fatalf("Could not get offer: %v", err)
 	}
@@ -214,7 +386,8 @@ func runClientMode(listenAddr, signalAddr string) {
 	}
 
 	// 发送 Answer 到信令服务器
-	if err := postSDP(signalAddr+"/answer", answer); err != nil {
+	answerURL := signalAddr + "/answer"
+	if err := postSDP(answerURL, answer); err != nil {
 		log.Fatalf("Failed to post answer: %v", err)
 	}
 	log.Println("Answer posted to signaling server.")
