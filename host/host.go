@@ -13,20 +13,21 @@ import (
 	"syscall"
 	"time"
 
+	wtsignal "webrtc-tunnel/signal"
+
 	"github.com/golang/glog"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
-	"webrtc-tunnel/signal"
 )
 
 type peerConnectionManager struct {
-	hostID      string
-	remoteAddr  string
-	protocol    string
-	signalConn  *websocket.Conn
-	peerCons    map[string]*webrtc.PeerConnection
-	webRTCAPI   *webrtc.API
-	config      webrtc.Configuration
+	hostID     string
+	remoteAddr string
+	protocol   string
+	signalConn *websocket.Conn
+	peerCons   map[string]*webrtc.PeerConnection
+	webRTCAPI  *webrtc.API
+	config     webrtc.Configuration
 }
 
 func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *websocket.Conn, stunServer string) *peerConnectionManager {
@@ -45,13 +46,13 @@ func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *w
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithSettingEngine(settingEngine))
 
 	return &peerConnectionManager{
-		hostID:      hostID,
-		remoteAddr:  remoteAddr,
-		protocol:    protocol,
-		signalConn:  signalConn,
-		peerCons:    make(map[string]*webrtc.PeerConnection),
-		webRTCAPI:   api,
-		config:      config,
+		hostID:     hostID,
+		remoteAddr: remoteAddr,
+		protocol:   protocol,
+		signalConn: signalConn,
+		peerCons:   make(map[string]*webrtc.PeerConnection),
+		webRTCAPI:  api,
+		config:     config,
 	}
 }
 
@@ -65,23 +66,23 @@ func (m *peerConnectionManager) handleSignal() {
 			return // Exit the loop, which will cause runHostSession to return and trigger a reconnect.
 		}
 
-		var msg signal.Message
+		var msg wtsignal.Message
 		if err := json.Unmarshal(msgBytes, &msg); err != nil {
 			glog.Errorf("Error unmarshaling signal message: %v", err)
 			continue
 		}
 
 		switch msg.Type {
-		case signal.MessageTypeOffer:
-			var payload signal.OfferPayload
+		case wtsignal.MessageTypeOffer:
+			var payload wtsignal.OfferPayload
 			if err := RemarshalPayload(msg.Payload, &payload); err != nil {
 				glog.Errorf("Error parsing offer payload: %v", err)
 				continue
 			}
 			glog.Infof("Received offer from client: %s", msg.SenderID)
 			m.handleOffer(msg.SenderID, payload.SDP)
-		case signal.MessageTypeCandidate:
-			var payload signal.CandidatePayload
+		case wtsignal.MessageTypeCandidate:
+			var payload wtsignal.CandidatePayload
 			if err := RemarshalPayload(msg.Payload, &payload); err != nil {
 				glog.Errorf("Error parsing candidate payload: %v", err)
 				continue
@@ -105,8 +106,8 @@ func (m *peerConnectionManager) handleOffer(clientID string, sdp webrtc.SessionD
 			return
 		}
 		candidate := c.ToJSON()
-		payload := signal.CandidatePayload{Candidate: candidate}
-		msg := signal.Message{Type: signal.MessageTypeCandidate, Payload: payload, TargetID: clientID, SenderID: m.hostID}
+		payload := wtsignal.CandidatePayload{Candidate: candidate}
+		msg := wtsignal.Message{Type: wtsignal.MessageTypeCandidate, Payload: payload, TargetID: clientID, SenderID: m.hostID}
 		glog.Infof("Sending ICE candidate to client %s", clientID)
 		if err := m.signalConn.WriteJSON(msg); err != nil {
 			glog.Errorf("Failed to send ICE candidate to %s: %v", clientID, err)
@@ -152,8 +153,8 @@ func (m *peerConnectionManager) handleOffer(clientID string, sdp webrtc.SessionD
 		return
 	}
 
-	payload := signal.AnswerPayload{SDP: answer}
-	msg := signal.Message{Type: signal.MessageTypeAnswer, Payload: payload, TargetID: clientID, SenderID: m.hostID}
+	payload := wtsignal.AnswerPayload{SDP: answer}
+	msg := wtsignal.Message{Type: wtsignal.MessageTypeAnswer, Payload: payload, TargetID: clientID, SenderID: m.hostID}
 	glog.Infof("Sending answer to client %s", clientID)
 	if err := m.signalConn.WriteJSON(msg); err != nil {
 		glog.Errorf("Failed to send answer to %s: %v", clientID, err)
@@ -301,8 +302,8 @@ func runHostSession(ctx context.Context, signalAddr, id, remoteAddr, protocol, s
 	defer c.Close()
 	glog.Info("Connected to signaling server.")
 
-	registerMsg := signal.Message{
-		Type:     signal.MessageTypeRegisterHost,
+	registerMsg := wtsignal.Message{
+		Type:     wtsignal.MessageTypeRegisterHost,
 		SenderID: id,
 	}
 	if err := c.WriteJSON(registerMsg); err != nil {

@@ -1,13 +1,12 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 	"strings"
 
+	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/golang/glog"
 )
 
 var cfgFile string
