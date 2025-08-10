@@ -1,0 +1,30 @@
+# Binaries
+main
+ming
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and temporary files
+test_*
+*.tmp
+*.temp
+
+# Go build artifacts
+*.test
+*.prof
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
