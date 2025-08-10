@@ -216,37 +216,12 @@ func (s *SignalingServer) handleHTTPAnswer(w http.ResponseWriter, r *http.Reques
 
 // runServerMode 在运行目标服务的机器上运行 (例如 Minecraft 服务器)
 func runServerMode(remoteAddr, signalAddr string) {
-	log.Printf("Starting in SERVER mode. Forwarding to %s", remoteAddr)
+	log.Printf("Starting in SERVER mode. Will connect to %s when WebRTC connection is established", remoteAddr)
 
-	// 监听本地 TCP 连接 (例如，来自游戏的连接)
-	listener, err := net.Listen("tcp", remoteAddr)
-	if err != nil {
-		log.Fatalf("Failed to listen on remote address: %v", err)
-	}
-	defer listener.Close()
-	log.Printf("Listening for connections on %s to forward...", remoteAddr)
-
-	for {
-		// 接受一个新的 TCP 连接
-		tcpConn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Failed to accept connection: %v", err)
-			continue
-		}
-		log.Printf("Accepted new connection from %s", tcpConn.RemoteAddr())
-
-		// 为每个新的 TCP 连接创建一个新的 WebRTC PeerConnection
-		go handleServerConnection(tcpConn, signalAddr)
-	}
-}
-
-func handleServerConnection(tcpConn net.Conn, signalAddr string) {
-	defer tcpConn.Close()
-
+	// 创建 WebRTC PeerConnection
 	peerConnection, err := createPeerConnection()
 	if err != nil {
-		log.Printf("Error creating peer connection: %v", err)
-		return
+		log.Fatalf("Error creating peer connection: %v", err)
 	}
 
 	// Channel to signal when the connection is done
@@ -257,43 +232,44 @@ func handleServerConnection(tcpConn net.Conn, signalAddr string) {
 		log.Printf("Peer Connection State has changed: %s", s.String())
 		if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateDisconnected {
 			log.Println("Peer connection closed/failed.")
-			close(done) // 发出信号，让 handleServerConnection 退出
+			close(done) // 发出信号，让函数退出
 		}
 	})
 
 	// 创建数据通道
 	dataChannel, err := peerConnection.CreateDataChannel(dataChannelLabel, nil)
 	if err != nil {
-		log.Printf("Error creating data channel: %v", err)
-		peerConnection.Close()
-		return
+		log.Fatalf("Error creating data channel: %v", err)
 	}
 
-	// 设置 OnOpen 回调，当 WebRTC 连接建立时开始数据转发
+	// 设置 OnOpen 回调，当 WebRTC 连接建立时连接到目标服务
 	dataChannel.OnOpen(func() {
-		log.Printf("Data channel '%s' opened. Starting to pipe data.", dataChannel.Label())
+		log.Printf("Data channel '%s' opened. Connecting to %s", dataChannel.Label(), remoteAddr)
+		
+		// 连接到目标服务 (例如 Minecraft 服务器)
+		tcpConn, err := net.Dial("tcp", remoteAddr)
+		if err != nil {
+			log.Printf("Failed to connect to target service: %v", err)
+			return
+		}
+		
+		log.Printf("Connected to target service at %s. Starting data forwarding.", remoteAddr)
 		pipeData(tcpConn, dataChannel)
 	})
 
 	// 创建 Offer
 	offer, err := peerConnection.CreateOffer(nil)
 	if err != nil {
-		log.Printf("Error creating offer: %v", err)
-		peerConnection.Close()
-		return
+		log.Fatalf("Error creating offer: %v", err)
 	}
 	if err := peerConnection.SetLocalDescription(offer); err != nil {
-		log.Printf("Error setting local description: %v", err)
-		peerConnection.Close()
-		return
+		log.Fatalf("Error setting local description: %v", err)
 	}
 
 	// 发送 Offer 到信令服务器
 	offerURL := signalAddr + "/offer"
 	if err := postSDP(offerURL, offer); err != nil {
-		log.Printf("Error posting offer: %v", err)
-		peerConnection.Close()
-		return
+		log.Fatalf("Error posting offer: %v", err)
 	}
 	log.Println("Offer posted to signaling server.")
 
@@ -301,22 +277,18 @@ func handleServerConnection(tcpConn net.Conn, signalAddr string) {
 	answerURL := signalAddr + "/answer"
 	answer, err := pollForSDP(answerURL)
 	if err != nil {
-		log.Printf("Error polling for answer: %v", err)
-		peerConnection.Close()
-		return
+		log.Fatalf("Error polling for answer: %v", err)
 	}
 
 	// 设置远端描述
 	if err := peerConnection.SetRemoteDescription(*answer); err != nil {
-		log.Printf("Error setting remote description: %v", err)
-		peerConnection.Close()
-		return
+		log.Fatalf("Error setting remote description: %v", err)
 	}
 	log.Println("Answer received and remote description set.")
 
-	// 阻塞，直到 OnConnectionStateChange 发出 done 信号
+	// 阻塞，直到连接关闭
 	<-done
-	log.Println("handleServerConnection finished.")
+	log.Println("Server mode finished.")
 }
 
 // runClientMode 在用户本地机器上运行
