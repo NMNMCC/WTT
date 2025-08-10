@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/golang/glog"
@@ -14,27 +13,17 @@ import (
 )
 
 const (
-	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer.
-	maxMessageSize = 10240 // Increased to allow for SDP
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
+	maxMessageSize = 10240
 )
 
-// safeConnection is a thread-safe wrapper around a websocket.Conn.
 type safeConnection struct {
 	conn *websocket.Conn
-	// Buffered channel of outbound messages.
 	send chan []byte
 }
 
-// writePump pumps messages from the send channel to the websocket connection.
 func (sc *safeConnection) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -46,76 +35,116 @@ func (sc *safeConnection) writePump() {
 		case message, ok := <-sc.send:
 			sc.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// The peerManager closed the channel.
 				sc.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-
 			if err := sc.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				glog.Errorf("Error writing message: %v", err)
 				return
 			}
-
 		case <-ticker.C:
 			sc.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := sc.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				glog.Warningf("Error writing ping: %v", err)
-				return // Connection might be dead.
+				return
 			}
 		}
 	}
 }
 
-// peerManager holds all registered host peers.
+type addHostRequest struct {
+	id   string
+	conn *websocket.Conn
+	resp chan *addHostResponse
+}
+
+type addHostResponse struct {
+	safeConn *safeConnection
+	err      error
+}
+
+type removeHostRequest struct {
+	id string
+}
+
+type routeMessageRequest struct {
+	msg      signal.Message
+	resp     chan error
+	sender   *websocket.Conn
+}
+
 type peerManager struct {
-	peers map[string]*safeConnection
-	mu    sync.RWMutex
+	peers       map[string]*safeConnection
+	addHost     chan *addHostRequest
+	removeHost  chan *removeHostRequest
+	routeMessage chan *routeMessageRequest
 }
 
 func newPeerManager() *peerManager {
 	return &peerManager{
-		peers: make(map[string]*safeConnection),
+		peers:       make(map[string]*safeConnection),
+		addHost:     make(chan *addHostRequest),
+		removeHost:  make(chan *removeHostRequest),
+		routeMessage: make(chan *routeMessageRequest),
 	}
 }
 
-func (pm *peerManager) addHost(id string, conn *websocket.Conn) (*safeConnection, error) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	if _, ok := pm.peers[id]; ok {
-		return nil, fmt.Errorf("host with ID '%s' already registered", id)
+func (pm *peerManager) run() {
+	for {
+		select {
+		case req := <-pm.addHost:
+			if _, ok := pm.peers[req.id]; ok {
+				req.resp <- &addHostResponse{err: fmt.Errorf("host with ID '%s' already registered", req.id)}
+				continue
+			}
+			safeConn := &safeConnection{conn: req.conn, send: make(chan []byte, 256)}
+			pm.peers[req.id] = safeConn
+			go safeConn.writePump()
+			glog.Infof("Host registered: %s", req.id)
+			req.resp <- &addHostResponse{safeConn: safeConn}
+		case req := <-pm.removeHost:
+			if safeConn, ok := pm.peers[req.id]; ok {
+				close(safeConn.send)
+				delete(pm.peers, req.id)
+				glog.Infof("Host removed: %s", req.id)
+			}
+		case req := <-pm.routeMessage:
+			targetID := req.msg.TargetID
+			if targetID == "" {
+				req.resp <- fmt.Errorf("message from %s has no target ID", req.msg.SenderID)
+				continue
+			}
+			target, ok := pm.peers[targetID]
+			if !ok {
+				errText := fmt.Sprintf("target host '%s' not found", targetID)
+				glog.Warning(errText)
+				errRsp := signal.Message{Type: signal.MessageTypeError, Payload: errText, TargetID: req.msg.SenderID}
+				req.sender.SetWriteDeadline(time.Now().Add(writeWait))
+				_ = req.sender.WriteJSON(errRsp)
+				req.resp <- fmt.Errorf(errText)
+				continue
+			}
+			glog.Infof("Routing message from '%s' to '%s' (type: %s)", req.msg.SenderID, req.msg.TargetID, req.msg.Type)
+			b, err := json.Marshal(req.msg)
+			if err != nil {
+				req.resp <- fmt.Errorf("failed to marshal message for target '%s': %v", targetID, err)
+				continue
+			}
+			select {
+			case target.send <- b:
+			default:
+				glog.Warningf("Dropping message for host %s, send channel full", targetID)
+			}
+			req.resp <- nil
+		}
 	}
-
-	safeConn := &safeConnection{conn: conn, send: make(chan []byte, 256)}
-	pm.peers[id] = safeConn
-	go safeConn.writePump()
-
-	glog.Infof("Host registered: %s", id)
-	return safeConn, nil
 }
 
-func (pm *peerManager) removeHost(id string) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	if safeConn, ok := pm.peers[id]; ok {
-		close(safeConn.send)
-		delete(pm.peers, id)
-		glog.Infof("Host removed: %s", id)
-	}
-}
-
-func (pm *peerManager) getHost(id string) *safeConnection {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-	return pm.peers[id]
-}
-
-// handleConnection manages the entire lifecycle of a websocket connection.
 func (pm *peerManager) handleConnection(conn *websocket.Conn) {
-	// The first message determines the connection's role.
 	var msg signal.Message
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	err := conn.ReadJSON(&msg)
-	conn.SetReadDeadline(time.Time{}) // Clear deadline after initial read
+	conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 			glog.Errorf("Error reading initial message: %v", err)
@@ -131,28 +160,31 @@ func (pm *peerManager) handleConnection(conn *websocket.Conn) {
 			conn.Close()
 			return
 		}
-		if _, err := pm.addHost(hostID, conn); err != nil {
-			glog.Errorf("Host registration failed: %v", err)
-			// Cannot easily write JSON back, as write pump is not started.
+		respChan := make(chan *addHostResponse)
+		pm.addHost <- &addHostRequest{id: hostID, conn: conn, resp: respChan}
+		resp := <-respChan
+		if resp.err != nil {
+			glog.Errorf("Host registration failed: %v", resp.err)
 			conn.Close()
 			return
 		}
-		// The readPump for the host will handle reading messages and cleanup.
 		pm.readPump(conn, hostID, true)
 		return
 	}
 
-	// For clients, route the first message, then enter a read loop for subsequent messages (candidates).
-	if err := pm.routeMessage(conn, msg); err != nil {
+	respChan := make(chan error)
+	pm.routeMessage <- &routeMessageRequest{msg: msg, resp: respChan, sender: conn}
+	if err := <-respChan; err != nil {
 		glog.Errorf("Failed to route initial client message: %v", err)
 	}
-	pm.readPump(conn, msg.SenderID, false) // Identify connection as client for logging
+	pm.readPump(conn, msg.SenderID, false)
 }
 
-// readPump pumps messages from the websocket connection to the router.
 func (pm *peerManager) readPump(conn *websocket.Conn, connID string, isHost bool) {
 	if isHost {
-		defer pm.removeHost(connID)
+		defer func() {
+			pm.removeHost <- &removeHostRequest{id: connID}
+		}()
 	} else {
 		defer conn.Close()
 	}
@@ -169,86 +201,47 @@ func (pm *peerManager) readPump(conn *websocket.Conn, connID string, isHost bool
 			} else {
 				glog.Infof("Connection from %s closed.", connID)
 			}
-			break // Exit loop on error or close
+			break
 		}
 
-		if err := pm.routeMessage(conn, msg); err != nil {
+		respChan := make(chan error)
+		pm.routeMessage <- &routeMessageRequest{msg: msg, resp: respChan, sender: conn}
+		if err := <-respChan; err != nil {
 			glog.Errorf("Routing error from %s: %v", connID, err)
 		}
 	}
 }
 
-// routeMessage forwards a message to a target host's send channel.
-func (pm *peerManager) routeMessage(senderConn *websocket.Conn, msg signal.Message) error {
-	targetID := msg.TargetID
-	if targetID == "" {
-		return fmt.Errorf("message from %s has no target ID", msg.SenderID)
-	}
-
-	target := pm.getHost(targetID)
-	if target == nil {
-		errText := fmt.Sprintf("target host '%s' not found", targetID)
-		glog.Warning(errText)
-		// Try to send error back to the sender
-		errRsp := signal.Message{Type: signal.MessageTypeError, Payload: errText, TargetID: msg.SenderID}
-		senderConn.SetWriteDeadline(time.Now().Add(writeWait))
-		_ = senderConn.WriteJSON(errRsp)
-		return fmt.Errorf(errText)
-	}
-
-	glog.Infof("Routing message from '%s' to '%s' (type: %s)", msg.SenderID, msg.TargetID, msg.Type)
-
-	b, err := json.Marshal(msg)
-	if err != nil {
-		return fmt.Errorf("failed to marshal message for target '%s': %v", targetID, err)
-	}
-
-	select {
-	case target.send <- b:
-	default:
-		glog.Warningf("Dropping message for host %s, send channel full", targetID)
-	}
-
-	return nil
-}
-
 func isAuthorized(r *http.Request, validTokens []string) bool {
-	// If no tokens are configured on the server, allow all connections.
 	if len(validTokens) == 0 {
 		return true
 	}
-
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		return false
 	}
-
 	parts := strings.Split(authHeader, " ")
 	if len(parts) != 2 || parts[0] != "Bearer" {
 		return false
 	}
 	token := parts[1]
-
 	for _, validToken := range validTokens {
 		if token == validToken {
 			return true
 		}
 	}
-
 	return false
 }
 
-// Run starts the signaling server.
 func Run(addr, certFile, keyFile string, allowedOrigins, validTokens []string) error {
-	peerManager := newPeerManager()
+	pm := newPeerManager()
+	go pm.run()
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			// Check if all origins are allowed
 			if len(allowedOrigins) == 1 && allowedOrigins[0] == "*" {
 				return true
 			}
-			// Otherwise, check against the whitelist
 			origin := r.Header.Get("Origin")
 			for _, allowed := range allowedOrigins {
 				if origin == allowed {
@@ -266,13 +259,12 @@ func Run(addr, certFile, keyFile string, allowedOrigins, validTokens []string) e
 			glog.Warningf("Rejecting unauthorized connection from %s", r.RemoteAddr)
 			return
 		}
-
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			glog.Errorf("Failed to upgrade connection: %v", err)
 			return
 		}
-		go peerManager.handleConnection(conn)
+		go pm.handleConnection(conn)
 	})
 
 	useTLS := certFile != "" && keyFile != ""
@@ -280,7 +272,6 @@ func Run(addr, certFile, keyFile string, allowedOrigins, validTokens []string) e
 		glog.Infof("Signaling server starting with TLS on %s", addr)
 		return http.ListenAndServeTLS(addr, certFile, keyFile, nil)
 	}
-
 	glog.Infof("Signaling server starting without TLS on %s", addr)
 	return http.ListenAndServe(addr, nil)
 }

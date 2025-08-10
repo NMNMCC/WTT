@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"webrtc-tunnel/common"
 	wtsignal "webrtc-tunnel/signal"
 
 	"github.com/golang/glog"
@@ -36,14 +37,9 @@ func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *w
 			{URLs: []string{stunServer}},
 		},
 	}
-	mediaEngine := &webrtc.MediaEngine{}
-	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
-		glog.Fatalf("Failed to register default codecs: %v", err)
-	}
-
 	settingEngine := webrtc.SettingEngine{}
 	settingEngine.DetachDataChannels()
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithSettingEngine(settingEngine))
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
 
 	return &peerConnectionManager{
 		hostID:     hostID,
@@ -63,7 +59,7 @@ func (m *peerConnectionManager) handleSignal() {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				glog.Errorf("Error reading signal message: %v", err)
 			}
-			return // Exit the loop, which will cause runHostSession to return and trigger a reconnect.
+			return
 		}
 
 		var msg wtsignal.Message
@@ -74,16 +70,16 @@ func (m *peerConnectionManager) handleSignal() {
 
 		switch msg.Type {
 		case wtsignal.MessageTypeOffer:
-			var payload wtsignal.OfferPayload
-			if err := RemarshalPayload(msg.Payload, &payload); err != nil {
+			payload, err := common.RemarshalPayload[wtsignal.OfferPayload](msg.Payload)
+			if err != nil {
 				glog.Errorf("Error parsing offer payload: %v", err)
 				continue
 			}
 			glog.Infof("Received offer from client: %s", msg.SenderID)
 			m.handleOffer(msg.SenderID, payload.SDP)
 		case wtsignal.MessageTypeCandidate:
-			var payload wtsignal.CandidatePayload
-			if err := RemarshalPayload(msg.Payload, &payload); err != nil {
+			payload, err := common.RemarshalPayload[wtsignal.CandidatePayload](msg.Payload)
+			if err != nil {
 				glog.Errorf("Error parsing candidate payload: %v", err)
 				continue
 			}
@@ -94,12 +90,42 @@ func (m *peerConnectionManager) handleSignal() {
 }
 
 func (m *peerConnectionManager) handleOffer(clientID string, sdp webrtc.SessionDescription) {
-	pc, err := m.webRTCAPI.NewPeerConnection(m.config)
+	pc, err := m.newPeerConnection(clientID)
 	if err != nil {
 		glog.Errorf("Failed to create peer connection for client %s: %v", clientID, err)
 		return
 	}
 	m.peerCons[clientID] = pc
+
+	if err := pc.SetRemoteDescription(sdp); err != nil {
+		glog.Errorf("Failed to set remote description for client %s: %v", clientID, err)
+		return
+	}
+
+	answer, err := pc.CreateAnswer(nil)
+	if err != nil {
+		glog.Errorf("Failed to create answer for client %s: %v", clientID, err)
+		return
+	}
+
+	if err := pc.SetLocalDescription(answer); err != nil {
+		glog.Errorf("Failed to set local description for client %s: %v", clientID, err)
+		return
+	}
+
+	payload := wtsignal.AnswerPayload{SDP: answer}
+	msg := wtsignal.Message{Type: wtsignal.MessageTypeAnswer, Payload: payload, TargetID: clientID, SenderID: m.hostID}
+	glog.Infof("Sending answer to client %s", clientID)
+	if err := m.signalConn.WriteJSON(msg); err != nil {
+		glog.Errorf("Failed to send answer to %s: %v", clientID, err)
+	}
+}
+
+func (m *peerConnectionManager) newPeerConnection(clientID string) (*webrtc.PeerConnection, error) {
+	pc, err := m.webRTCAPI.NewPeerConnection(m.config)
+	if err != nil {
+		return nil, err
+	}
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
@@ -137,28 +163,7 @@ func (m *peerConnectionManager) handleOffer(clientID string, sdp webrtc.SessionD
 		}
 	})
 
-	if err := pc.SetRemoteDescription(sdp); err != nil {
-		glog.Errorf("Failed to set remote description for client %s: %v", clientID, err)
-		return
-	}
-
-	answer, err := pc.CreateAnswer(nil)
-	if err != nil {
-		glog.Errorf("Failed to create answer for client %s: %v", clientID, err)
-		return
-	}
-
-	if err := pc.SetLocalDescription(answer); err != nil {
-		glog.Errorf("Failed to set local description for client %s: %v", clientID, err)
-		return
-	}
-
-	payload := wtsignal.AnswerPayload{SDP: answer}
-	msg := wtsignal.Message{Type: wtsignal.MessageTypeAnswer, Payload: payload, TargetID: clientID, SenderID: m.hostID}
-	glog.Infof("Sending answer to client %s", clientID)
-	if err := m.signalConn.WriteJSON(msg); err != nil {
-		glog.Errorf("Failed to send answer to %s: %v", clientID, err)
-	}
+	return pc, nil
 }
 
 func (m *peerConnectionManager) handleCandidate(clientID string, candidate webrtc.ICECandidateInit) {
@@ -313,29 +318,17 @@ func runHostSession(ctx context.Context, signalAddr, id, remoteAddr, protocol, s
 
 	manager := newPeerConnectionManager(id, remoteAddr, protocol, c, stunServer)
 
-	// handleSignal will block until the connection is lost.
-	// We run it in a goroutine so we can select on the context.
 	errChan := make(chan error, 1)
 	go func() {
 		manager.handleSignal()
-		errChan <- nil // Signal that handleSignal has returned
+		errChan <- nil
 	}()
 
 	select {
 	case <-ctx.Done():
-		// The application is shutting down.
-		c.Close() // Close the connection to unblock handleSignal.
+		c.Close()
 		return ctx.Err()
 	case <-errChan:
-		// handleSignal exited, probably due to connection loss.
 		return fmt.Errorf("signaling connection lost")
 	}
-}
-
-func RemarshalPayload(payload interface{}, target interface{}) error {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, target)
 }
