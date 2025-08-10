@@ -38,7 +38,6 @@ func Run(signalAddr, hostID, localAddr, protocol string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create peer connection: %v", err)
 	}
-	// defer pc.Close() // Closing is handled by OnConnectionStateChange
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
@@ -83,20 +82,21 @@ func Run(signalAddr, hostID, localAddr, protocol string) error {
 		}
 	}
 
-
 	dc.OnOpen(func() {
 		glog.Infof("Data channel '%s'-%d opened. Waiting for local connection on %s.", dc.Label(), dc.ID(), localAddr)
 		if protocol == "udp" {
 			localConn, err := net.ListenPacket(protocol, localAddr)
 			if err != nil {
-				glog.Fatalf("Failed to listen on local address (UDP): %v", err)
+				glog.Errorf("Failed to listen on local address (UDP): %v", err)
+				os.Exit(1)
 			}
 			glog.Infof("Listening on %s. Please connect your application.", localAddr)
 			proxyTrafficUDP(dc, localConn)
 		} else {
 			listener, err := net.Listen(protocol, localAddr)
 			if err != nil {
-				glog.Fatalf("Failed to listen on local address (TCP): %v", err)
+				glog.Errorf("Failed to listen on local address (TCP): %v", err)
+				os.Exit(1)
 			}
 			glog.Infof("Listening on %s. Please connect your application.", localAddr)
 

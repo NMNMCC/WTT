@@ -10,6 +10,14 @@ import (
 	"webrtc-tunnel/signal"
 )
 
+// closableConnection defines the interface for a connection that can be closed.
+// This helps in testing by allowing us to mock the websocket connection.
+type closableConnection interface {
+	Close() error
+	WriteJSON(v interface{}) error
+	ReadJSON(v interface{}) error
+}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow all origins
@@ -18,17 +26,17 @@ var upgrader = websocket.Upgrader{
 
 // peerManager holds all registered host peers.
 type peerManager struct {
-	peers map[string]*websocket.Conn
+	peers map[string]closableConnection
 	mu    sync.RWMutex
 }
 
 func newPeerManager() *peerManager {
 	return &peerManager{
-		peers: make(map[string]*websocket.Conn),
+		peers: make(map[string]closableConnection),
 	}
 }
 
-func (pm *peerManager) addHost(id string, conn *websocket.Conn) error {
+func (pm *peerManager) addHost(id string, conn closableConnection) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if _, ok := pm.peers[id]; ok {
@@ -43,13 +51,15 @@ func (pm *peerManager) removeHost(id string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if conn, ok := pm.peers[id]; ok {
-		conn.Close()
+		if conn != nil {
+			conn.Close()
+		}
 		delete(pm.peers, id)
 		glog.Infof("Host removed: %s", id)
 	}
 }
 
-func (pm *peerManager) getHost(id string) *websocket.Conn {
+func (pm *peerManager) getHost(id string) closableConnection {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.peers[id]
@@ -92,7 +102,7 @@ func (pm *peerManager) handleConnection(conn *websocket.Conn) {
 }
 
 // readLoop reads messages from a websocket and routes them.
-func (pm *peerManager) readLoop(conn *websocket.Conn, connType string) {
+func (pm *peerManager) readLoop(conn closableConnection, connType string) {
 	for {
 		var msg signal.Message
 		if err := conn.ReadJSON(&msg); err != nil {
@@ -112,7 +122,7 @@ func (pm *peerManager) readLoop(conn *websocket.Conn, connType string) {
 }
 
 // routeMessage forwards a message to a target host.
-func (pm *peerManager) routeMessage(senderConn *websocket.Conn, msg signal.Message) error {
+func (pm *peerManager) routeMessage(senderConn closableConnection, msg signal.Message) error {
 	targetID := msg.TargetID
 	if targetID == "" {
 		return fmt.Errorf("message has no target ID")

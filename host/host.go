@@ -26,7 +26,7 @@ type peerConnectionManager struct {
 	config      webrtc.Configuration
 }
 
-func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *websocket.Conn) *peerConnectionManager {
+func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *websocket.Conn) (*peerConnectionManager, error) {
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{stunServer}},
@@ -34,7 +34,7 @@ func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *w
 	}
 	mediaEngine := &webrtc.MediaEngine{}
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
-		glog.Fatalf("Failed to register default codecs: %v", err)
+		return nil, fmt.Errorf("failed to register default codecs: %w", err)
 	}
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
 
@@ -46,7 +46,7 @@ func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *w
 		peerCons:    make(map[string]*webrtc.PeerConnection),
 		webRTCAPI:   api,
 		config:      config,
-	}
+	}, nil
 }
 
 func (m *peerConnectionManager) handleSignal() {
@@ -253,7 +253,10 @@ func Run(signalAddr, id, remoteAddr, protocol string) error {
 	}
 	glog.Info("Registered with signaling server.")
 
-	manager := newPeerConnectionManager(id, remoteAddr, protocol, c)
+	manager, err := newPeerConnectionManager(id, remoteAddr, protocol, c)
+	if err != nil {
+		return fmt.Errorf("failed to create peer connection manager: %w", err)
+	}
 	manager.handleSignal()
 
 	return nil
