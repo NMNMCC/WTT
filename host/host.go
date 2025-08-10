@@ -1,19 +1,22 @@
 package host
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/golang/glog"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
 	"webrtc-tunnel/signal"
-)
-
-const (
-	stunServer = "stun:stun.l.google.com:19302"
 )
 
 type peerConnectionManager struct {
@@ -26,7 +29,7 @@ type peerConnectionManager struct {
 	config      webrtc.Configuration
 }
 
-func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *websocket.Conn) *peerConnectionManager {
+func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *websocket.Conn, stunServer string) *peerConnectionManager {
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{stunServer}},
@@ -36,7 +39,10 @@ func newPeerConnectionManager(hostID, remoteAddr, protocol string, signalConn *w
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
 		glog.Fatalf("Failed to register default codecs: %v", err)
 	}
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
+
+	settingEngine := webrtc.SettingEngine{}
+	settingEngine.DetachDataChannels()
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithSettingEngine(settingEngine))
 
 	return &peerConnectionManager{
 		hostID:      hostID,
@@ -56,7 +62,7 @@ func (m *peerConnectionManager) handleSignal() {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				glog.Errorf("Error reading signal message: %v", err)
 			}
-			return
+			return // Exit the loop, which will cause runHostSession to return and trigger a reconnect.
 		}
 
 		var msg signal.Message
@@ -100,14 +106,11 @@ func (m *peerConnectionManager) handleOffer(clientID string, sdp webrtc.SessionD
 		}
 		candidate := c.ToJSON()
 		payload := signal.CandidatePayload{Candidate: candidate}
-		msg := signal.Message{
-			Type:     signal.MessageTypeCandidate,
-			Payload:  payload,
-			TargetID: clientID,
-			SenderID: m.hostID,
-		}
+		msg := signal.Message{Type: signal.MessageTypeCandidate, Payload: payload, TargetID: clientID, SenderID: m.hostID}
 		glog.Infof("Sending ICE candidate to client %s", clientID)
-		m.signalConn.WriteJSON(msg)
+		if err := m.signalConn.WriteJSON(msg); err != nil {
+			glog.Errorf("Failed to send ICE candidate to %s: %v", clientID, err)
+		}
 	})
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
@@ -126,7 +129,9 @@ func (m *peerConnectionManager) handleOffer(clientID string, sdp webrtc.SessionD
 		glog.Infof("Peer connection with %s state has changed: %s", clientID, s.String())
 		if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed {
 			glog.Infof("Closing connection with client %s", clientID)
-			pc.Close()
+			if pc.ConnectionState() != webrtc.PeerConnectionStateClosed {
+				pc.Close()
+			}
 			delete(m.peerCons, clientID)
 		}
 	})
@@ -148,14 +153,11 @@ func (m *peerConnectionManager) handleOffer(clientID string, sdp webrtc.SessionD
 	}
 
 	payload := signal.AnswerPayload{SDP: answer}
-	msg := signal.Message{
-		Type:     signal.MessageTypeAnswer,
-		Payload:  payload,
-		TargetID: clientID,
-		SenderID: m.hostID,
-	}
+	msg := signal.Message{Type: signal.MessageTypeAnswer, Payload: payload, TargetID: clientID, SenderID: m.hostID}
 	glog.Infof("Sending answer to client %s", clientID)
-	m.signalConn.WriteJSON(msg)
+	if err := m.signalConn.WriteJSON(msg); err != nil {
+		glog.Errorf("Failed to send answer to %s: %v", clientID, err)
+	}
 }
 
 func (m *peerConnectionManager) handleCandidate(clientID string, candidate webrtc.ICECandidateInit) {
@@ -233,11 +235,66 @@ func (m *peerConnectionManager) proxyTrafficUDP(dc *webrtc.DataChannel) {
 	})
 }
 
+func Run(signalAddr, id, remoteAddr, protocol, stunServer, token string) error {
+	appCtx, cancelApp := context.WithCancel(context.Background())
+	defer cancelApp()
 
-func Run(signalAddr, id, remoteAddr, protocol string) error {
+	go func() {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		<-sigs
+		glog.Info("Shutdown signal received, cancelling application context.")
+		cancelApp()
+	}()
+
 	glog.Infof("Starting host mode. ID: %s, Protocol: %s, Forwarding to: %s", id, protocol, remoteAddr)
 
-	c, _, err := websocket.DefaultDialer.Dial(signalAddr, nil)
+	var attempt int
+	for {
+		attempt++
+		select {
+		case <-appCtx.Done():
+			glog.Info("Application shutdown initiated. Will not reconnect.")
+			return nil
+		default:
+			glog.Infof("Connection attempt #%d to %s", attempt, signalAddr)
+		}
+
+		err := runHostSession(appCtx, signalAddr, id, remoteAddr, protocol, stunServer, token)
+
+		if err != nil {
+			glog.Errorf("Session ended with error: %v", err)
+		} else {
+			glog.Info("Session ended gracefully.")
+		}
+
+		if appCtx.Err() != nil {
+			glog.Info("Application context is done, exiting.")
+			return nil
+		}
+
+		backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+		glog.Infof("Will attempt to reconnect in %v.", backoff)
+
+		select {
+		case <-appCtx.Done():
+			glog.Info("Application shutdown initiated during backoff.")
+			return nil
+		case <-time.After(backoff):
+		}
+	}
+}
+
+func runHostSession(ctx context.Context, signalAddr, id, remoteAddr, protocol, stunServer, token string) error {
+	headers := http.Header{}
+	if token != "" {
+		headers.Add("Authorization", "Bearer "+token)
+	}
+
+	c, _, err := websocket.DefaultDialer.Dial(signalAddr, headers)
 	if err != nil {
 		return fmt.Errorf("failed to connect to signaling server: %v", err)
 	}
@@ -253,10 +310,25 @@ func Run(signalAddr, id, remoteAddr, protocol string) error {
 	}
 	glog.Info("Registered with signaling server.")
 
-	manager := newPeerConnectionManager(id, remoteAddr, protocol, c)
-	manager.handleSignal()
+	manager := newPeerConnectionManager(id, remoteAddr, protocol, c, stunServer)
 
-	return nil
+	// handleSignal will block until the connection is lost.
+	// We run it in a goroutine so we can select on the context.
+	errChan := make(chan error, 1)
+	go func() {
+		manager.handleSignal()
+		errChan <- nil // Signal that handleSignal has returned
+	}()
+
+	select {
+	case <-ctx.Done():
+		// The application is shutting down.
+		c.Close() // Close the connection to unblock handleSignal.
+		return ctx.Err()
+	case <-errChan:
+		// handleSignal exited, probably due to connection loss.
+		return fmt.Errorf("signaling connection lost")
+	}
 }
 
 func RemarshalPayload(payload interface{}, target interface{}) error {
