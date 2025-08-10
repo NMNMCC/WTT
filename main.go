@@ -4,31 +4,33 @@ import (
 	"flag"
 
 	"github.com/golang/glog"
+	"github.com/spf13/pflag"
 	"webrtc-tunnel/client"
 	"webrtc-tunnel/host"
 	"webrtc-tunnel/server"
 )
 
 func main() {
-	mode := flag.String("mode", "", "Mode to run in: 'server', 'host', or 'client'")
+	mode := pflag.String("mode", "", "Mode to run in: 'server', 'host', or 'client'")
 
 	// Server flags
-	serverAddr := flag.String("addr", ":8080", "Address for the signaling server to listen on (server mode)")
+	serverAddr := pflag.String("addr", ":8080", "Address for the signaling server to listen on (server mode)")
 
 	// Client/Host flags
-	signalAddr := flag.String("signal", "ws://localhost:8080", "Signaling server address (client/host mode)")
-	id := flag.String("id", "", "ID to connect to (client mode) or register as (host mode)")
+	signalAddr := pflag.String("signal", "ws://localhost:8080", "Signaling server address (client/host mode)")
+	id := pflag.String("id", "", "ID to connect to (client mode) or register as (host mode)")
 
 	// Client flags
-	localAddr := flag.String("local", "localhost:25565", "Local address to listen on for incoming connections (client mode)")
+	localAddr := pflag.String("local", "localhost:25565", "Local address to listen on for incoming connections (client mode)")
 
 	// Host flags
-	remoteAddr := flag.String("remote", "localhost:25565", "Remote address to forward traffic to (host mode)")
+	remoteAddr := pflag.String("remote", "localhost:25565", "Remote address to forward traffic to (host mode)")
 
-	protocol := flag.String("protocol", "tcp", "Protocol to tunnel (tcp or udp)")
+	protocol := pflag.String("protocol", "tcp", "Protocol to tunnel (tcp or udp)")
 
 	// glog flags are registered in init(), so they will be included here.
-	flag.Parse()
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
+	pflag.Parse()
 
 	// Defer flushing all logs before the program exits.
 	defer glog.Flush()
