@@ -373,9 +373,25 @@ func createPeerConnection() (*webrtc.PeerConnection, error) {
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{stunServer}},
+			// 添加更多的 STUN 服务器以提高连接成功率
+			{URLs: []string{"stun:stun1.l.google.com:19302"}},
+			{URLs: []string{"stun:stun2.l.google.com:19302"}},
 		},
 	}
-	return webrtc.NewPeerConnection(config)
+	
+	pc, err := webrtc.NewPeerConnection(config)
+	if err != nil {
+		return nil, err
+	}
+	
+	// 添加 ICE 候选者事件处理
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			log.Printf("ICE Candidate: %s", candidate.String())
+		}
+	})
+	
+	return pc, nil
 }
 
 // postSDP 将 SDP (offer/answer) 发送到信令服务器
