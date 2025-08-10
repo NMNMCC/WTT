@@ -3,11 +3,12 @@ package main
 import (
 	"flag"
 
-	"github.com/golang/glog"
-	"github.com/spf13/pflag"
 	"webrtc-tunnel/client"
 	"webrtc-tunnel/host"
 	"webrtc-tunnel/server"
+
+	"github.com/golang/glog"
+	"github.com/spf13/pflag"
 )
 
 func main() {
@@ -35,29 +36,28 @@ func main() {
 	// Defer flushing all logs before the program exits.
 	defer glog.Flush()
 
-
 	switch *mode {
 	case "server":
 		if err := server.Run(*serverAddr); err != nil {
-			glog.Fatalf("Error in server mode: %v", err)
+			glog.Errorf("Error in server mode: %v", err)
 		}
 	case "host":
 		if *id == "" {
-			glog.Fatal("Host mode requires an -id")
+			glog.Error("Host mode requires an -id")
 		}
 		if err := host.Run(*signalAddr, *id, *remoteAddr, *protocol); err != nil {
-			glog.Fatalf("Error in host mode: %v", err)
+			glog.Errorf("Error in host mode: %v", err)
 		}
 	case "client":
 		if *id == "" {
-			glog.Fatal("Client mode requires an -id to connect to")
+			glog.Error("Client mode requires an -id to connect to")
 		}
 		if err := client.Run(*signalAddr, *id, *localAddr, *protocol); err != nil {
-			glog.Fatalf("Error in client mode: %v", err)
+			glog.Errorf("Error in client mode: %v", err)
 		}
 	case "":
-		glog.Fatal("-mode is required. Please specify 'server', 'host', or 'client'.")
+		glog.Error("--mode is required. Please specify 'server', 'host', or 'client'.")
 	default:
-		glog.Fatalf("Unknown mode: %s. Please use 'server', 'host', or 'client'.", *mode)
+		glog.Errorf("Unknown mode: %s. Please use 'server', 'host', or 'client'.", *mode)
 	}
 }
