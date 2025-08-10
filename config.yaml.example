@@ -1,0 +1,41 @@
+# Example configuration for webrtc-tunnel
+# This file can be used as a template for your own `config.yaml`.
+# Settings can also be provided via environment variables, prefixed with "WTT_".
+# For example, WTT_SIGNAL or WTT_STUN_SERVER.
+# Command-line flags always take the highest precedence.
+
+# Common settings for client and host
+signal: "ws://localhost:8080"
+protocol: "tcp"
+
+# STUN server to use for NAT traversal.
+stun:
+  server: "stun:stun.l.google.com:19302"
+
+# Server-specific settings
+server:
+  addr: ":8080"
+  # allowed-origins: ["http://localhost:3000", "https://my-app.com"] # Example of a whitelist
+  allowed-origins: ["*"] # Default: allow all origins
+  tls:
+    cert-file: "" # Path to TLS cert file. If set, enables WSS.
+    key-file: ""  # Path to TLS key file. If set, enables WSS.
+
+# Host-specific settings
+host:
+  id: "my-host"
+  remote: "localhost:25565"
+
+# Common authentication token for client and host
+token: "" # Example: "my-secret-token"
+
+# Client-specific settings
+client:
+  id: "my-host" # The ID of the host to connect to
+  local: "localhost:25565"
+
+# Server-side authentication settings
+server:
+  auth:
+    # A list of valid tokens. If empty, authentication is disabled.
+    valid-tokens: [] # Example: ["my-secret-token", "another-valid-token"]
