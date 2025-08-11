@@ -1,4 +1,4 @@
-package main
+package test
 
 import (
 	"context"
@@ -78,7 +78,9 @@ func TestE2ETCP(t *testing.T) {
 			Token:     "secret",
 			Timeout:   15,
 		}
-		client.Run(mainCtx, clientCfg)
+		if err := client.Run(mainCtx, clientCfg); err != nil {
+			glog.Fatalf("Client failed: %v", err)
+		}
 	}()
 
 	// Allow time for WebRTC connection to establish
