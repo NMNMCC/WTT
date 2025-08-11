@@ -25,27 +25,7 @@ type ClientConfig struct {
 	Timeout   int // seconds
 }
 
-func check(cfg ClientConfig) error {
-	if cfg.HostID == "" {
-		return fmt.Errorf("client mode requires a target host ID")
-	}
-	if cfg.SigAddr == "" {
-		return fmt.Errorf("client mode requires a signaling server address")
-	}
-	if cfg.LocalAddr == "" {
-		return fmt.Errorf("client mode requires a local address to listen on")
-	}
-	if cfg.Protocol != common.TCP && cfg.Protocol != common.UDP {
-		return fmt.Errorf("unsupported protocol: %s", cfg.Protocol)
-	}
-	return nil
-}
-
-func Run(ctx context.Context, cfg ClientConfig) {
-	if err := check(cfg); err != nil {
-		glog.Fatalf("Invalid client configuration: %v", err)
-	}
-
+func Run(ctx context.Context, cfg ClientConfig) error {
 	if cfg.ID == "" {
 		cfg.ID = uuid.NewString()
 		glog.Infof("No client ID provided, generated one: %s", cfg.ID)
@@ -53,25 +33,26 @@ func Run(ctx context.Context, cfg ClientConfig) {
 
 	wsc, err := common.WebSocketConn(cfg.SigAddr, cfg.Token)
 	if err != nil {
-		glog.Fatalf("Failed to connect to signaling server: %v", err)
+		return fmt.Errorf("failed to connect to signaling server: %w", err)
 	}
 	defer wsc.Close()
 
 	pc, dc, err := negotiate(ctx, wsc, cfg)
 	if err != nil {
-		glog.Fatalf("Failed to establish PeerConnection: %v", err)
+		return fmt.Errorf("failed to establish PeerConnection: %w", err)
 	}
 	defer pc.Close()
 
 	if err := tunnel(ctx, pc, dc, cfg.Protocol, cfg.LocalAddr); err != nil {
-		glog.Fatalf("Failed to set up tunnel: %v", err)
+		return fmt.Errorf("failed to set up tunnel: %w", err)
 	}
 
-	glog.Infof("Client '%s' connected to host '%s' and listening on %s", cfg.ID, cfg.HostID, cfg.LocalAddr)
+	glog.Infof("Client '%s' connected to host '%s'", cfg.ID, cfg.HostID)
 
 	// Wait for context cancellation
 	<-ctx.Done()
 	glog.Info("Client shutting down...")
+	return nil
 }
 
 func negotiate(ctx context.Context, wsc *websocket.Conn, cfg ClientConfig) (*webrtc.PeerConnection, *webrtc.DataChannel, error) {
@@ -79,7 +60,7 @@ func negotiate(ctx context.Context, wsc *websocket.Conn, cfg ClientConfig) (*web
 		ICEServers: []webrtc.ICEServer{{URLs: cfg.STUNAddrs}},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create PeerConnection: %v", err)
+		return nil, nil, fmt.Errorf("failed to create PeerConnection: %w", err)
 	}
 
 	connected := make(chan struct{})
@@ -89,12 +70,9 @@ func negotiate(ctx context.Context, wsc *websocket.Conn, cfg ClientConfig) (*web
 			close(connected)
 		}
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
-			// If connection fails or closes, we should stop trying to negotiate
 			select {
 			case <-connected:
-				// already connected and closed, do nothing
 			default:
-				// if not connected yet, close the channel to signal failure
 				close(connected)
 			}
 		}
@@ -118,16 +96,16 @@ func negotiate(ctx context.Context, wsc *websocket.Conn, cfg ClientConfig) (*web
 
 	dc, err := pc.CreateDataChannel("wtt", nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create DataChannel: %v", err)
+		return nil, nil, fmt.Errorf("failed to create DataChannel: %w", err)
 	}
 
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create offer: %v", err)
+		return nil, nil, fmt.Errorf("failed to create offer: %w", err)
 	}
 
 	if err := pc.SetLocalDescription(offer); err != nil {
-		return nil, nil, fmt.Errorf("failed to set local description: %v", err)
+		return nil, nil, fmt.Errorf("failed to set local description: %w", err)
 	}
 
 	offerMsg := common.Message[common.OfferPayload]{
@@ -137,7 +115,7 @@ func negotiate(ctx context.Context, wsc *websocket.Conn, cfg ClientConfig) (*web
 		SenderID: cfg.ID,
 	}
 	if err := wsc.WriteJSON(offerMsg); err != nil {
-		return nil, nil, fmt.Errorf("failed to send offer: %v", err)
+		return nil, nil, fmt.Errorf("failed to send offer: %w", err)
 	}
 
 	go func() {
@@ -213,19 +191,15 @@ func tunnel(ctx context.Context, pc *webrtc.PeerConnection, dc *webrtc.DataChann
 				if err != nil {
 					glog.Warningf("Failed to accept local connection: %v", err)
 					if ctx.Err() != nil {
-						// context was cancelled, so this is expected
 						return
 					}
 					continue
 				}
 				glog.Infof("Accepted local connection from %s", localConn.RemoteAddr())
-				// Since we have one data channel, we can only bridge one connection at a time.
-				// The bridge function is blocking.
 				if err := common.BridgeStream(dc, localConn); err != nil {
 					glog.Errorf("Failed to bridge connection: %v", err)
 				}
 				glog.Info("Bridged connection closed.")
-				// After the bridge is closed, we can accept a new connection.
 			}
 		}()
 	})

@@ -20,6 +20,7 @@ var Server = cli.Command{
 			Name:        "tokens",
 			Aliases:     []string{"t"},
 			DefaultText: "token1,token2",
+			Required:    true,
 		},
 	},
 	Action: func(ctx context.Context, c *cli.Command) error {
