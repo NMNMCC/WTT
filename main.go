@@ -1,20 +1,26 @@
 package main
 
 import (
-	"flag"
+	"context"
+	"os"
+	"wtt/cmd"
 
-	"github.com/golang/glog"
-	"github.com/spf13/pflag"
-	"webrtc-tunnel/cmd"
+	"github.com/urfave/cli/v3"
 )
 
 func main() {
-	// glog flags are registered in init(), so they will be included here.
-	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
-	pflag.Parse()
+	app := cli.Command{
+		UseShortOptionHandling: true,
 
-	// Defer flushing all logs before the program exits.
-	defer glog.Flush()
+		Name:        "WTT",
+		Description: "Simple WebRTC Tunnel",
 
-	cmd.Execute()
+		Commands: []*cli.Command{
+			&cmd.Client,
+			&cmd.Host,
+			&cmd.Server,
+		},
+	}
+
+	app.Run(context.Background(), os.Args)
 }

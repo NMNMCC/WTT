@@ -1,63 +1,73 @@
 package cmd
 
 import (
-	"github.com/golang/glog"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
-	"webrtc-tunnel/client"
+	"context"
+	"fmt"
+	"wtt/client"
+	"wtt/common"
+
+	"github.com/urfave/cli/v3"
 )
 
-// clientCmd represents the client command
-var clientCmd = &cobra.Command{
-	Use:   "client",
-	Short: "Run in client mode",
-	Long: `Client mode connects to a specific host (via the signaling server)
-and exposes the tunnel on a local port.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		id := viper.GetString("client.id")
-		if id == "" {
-			glog.Fatal("Client mode requires an --id to connect to")
-		}
-		signalAddr := viper.GetString("signal")
-		localAddr := viper.GetString("client.local")
-		protocol := viper.GetString("protocol")
-		stunServer := viper.GetString("stun.server")
-		token := viper.GetString("token")
-
-		if err := client.Run(signalAddr, id, localAddr, protocol, stunServer, token); err != nil {
-			glog.Fatalf("Error in client mode: %v", err)
-		}
+var Client = cli.Command{
+	Name: "client",
+	Flags: []cli.Flag{
+		&cli.StringFlag{
+			Name:    "id",
+			Aliases: []string{"i"},
+		},
+		&cli.StringFlag{
+			Name:    "host-id",
+			Aliases: []string{"h"},
+		},
+		&cli.StringFlag{
+			Name:    "signaling-address",
+			Aliases: []string{"s"},
+		},
+		&cli.StringFlag{
+			Name:    "local-address",
+			Aliases: []string{"l"},
+		},
+		&cli.StringFlag{
+			Name:    "protocol",
+			Aliases: []string{"p"},
+			Value:   "tcp",
+			Validator: func(v string) error {
+				if v != "tcp" && v != "udp" {
+					return fmt.Errorf("unsupported protocol: %s", v)
+				}
+				return nil
+			},
+		},
+		&cli.StringSliceFlag{
+			Name:        "stun-addresses",
+			Aliases:     []string{"t"},
+			DefaultText: "stun:stun.l.google.com:19302",
+		},
+		&cli.StringFlag{
+			Name:    "token",
+			Aliases: []string{"k"},
+		},
+		&cli.Int16Flag{
+			Name:    "timeout",
+			Aliases: []string{"T"},
+			Value:   10,
+		},
 	},
-}
+	Action: func(ctx context.Context, c *cli.Command) error {
+		cfg := client.ClientConfig{
+			ID:        c.String("id"),
+			HostID:    c.String("host-id"),
+			SigAddr:   c.String("signaling-address"),
+			LocalAddr: c.String("local-address"),
+			Protocol:  common.Protocol(c.String("protocol")),
+			STUNAddrs: c.StringSlice("stun-addresses"),
+			Token:     c.String("token"),
+			Timeout:   c.Int("timeout"),
+		}
 
-func init() {
-	rootCmd.AddCommand(clientCmd)
+		client.Run(cfg)
 
-	clientCmd.Flags().String("id", "", "ID of the host to connect to")
-	clientCmd.Flags().String("local", "localhost:25565", "Local address to listen on")
-
-	// Common flags with host
-	clientCmd.PersistentFlags().String("signal", "ws://localhost:8080", "Signaling server address")
-	clientCmd.PersistentFlags().String("protocol", "tcp", "Protocol to tunnel (tcp or udp)")
-	clientCmd.PersistentFlags().String("stun-server", "stun:stun.l.google.com:19302", "STUN server address")
-	clientCmd.PersistentFlags().String("token", "", "Authentication token")
-
-	if err := viper.BindPFlag("client.id", clientCmd.Flags().Lookup("id")); err != nil {
-		glog.Fatalf("Failed to bind client.id flag: %v", err)
-	}
-	if err := viper.BindPFlag("client.local", clientCmd.Flags().Lookup("local")); err != nil {
-		glog.Fatalf("Failed to bind client.local flag: %v", err)
-	}
-	if err := viper.BindPFlag("signal", clientCmd.PersistentFlags().Lookup("signal")); err != nil {
-		glog.Fatalf("Failed to bind signal flag: %v", err)
-	}
-	if err := viper.BindPFlag("protocol", clientCmd.PersistentFlags().Lookup("protocol")); err != nil {
-		glog.Fatalf("Failed to bind protocol flag: %v", err)
-	}
-	if err := viper.BindPFlag("stun.server", clientCmd.PersistentFlags().Lookup("stun-server")); err != nil {
-		glog.Fatalf("Failed to bind stun.server flag: %v", err)
-	}
-	if err := viper.BindPFlag("token", clientCmd.PersistentFlags().Lookup("token")); err != nil {
-		glog.Fatalf("Failed to bind token flag: %v", err)
-	}
+		select {}
+	},
 }

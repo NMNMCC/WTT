@@ -1,9 +1,14 @@
 {
     "cSpell.words": [
+        "cand",
         "github",
         "glog",
+        "Infof",
         "pflag",
+        "unmarshal",
+        "upgrader",
         "uuid",
+        "Warningf",
         "webrtc"
     ]
 }
