@@ -17,12 +17,14 @@ var Host = cli.Command{
 			Aliases: []string{"i"},
 		},
 		&cli.StringFlag{
-			Name:    "signaling-address",
-			Aliases: []string{"s"},
+			Name:     "signaling-address",
+			Aliases:  []string{"s"},
+			Required: true,
 		},
 		&cli.StringFlag{
-			Name:    "local-address",
-			Aliases: []string{"l"},
+			Name:     "local-address",
+			Aliases:  []string{"l"},
+			Required: true,
 		},
 		&cli.StringFlag{
 			Name:    "protocol",

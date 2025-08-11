@@ -17,16 +17,19 @@ var Client = cli.Command{
 			Aliases: []string{"i"},
 		},
 		&cli.StringFlag{
-			Name:    "host-id",
-			Aliases: []string{"h"},
+			Name:     "host-id",
+			Aliases:  []string{"h"},
+			Required: true,
 		},
 		&cli.StringFlag{
-			Name:    "signaling-address",
-			Aliases: []string{"s"},
+			Name:     "signaling-address",
+			Aliases:  []string{"s"},
+			Required: true,
 		},
 		&cli.StringFlag{
-			Name:    "local-address",
-			Aliases: []string{"l"},
+			Name:     "local-address",
+			Aliases:  []string{"l"},
+			Required: true,
 		},
 		&cli.StringFlag{
 			Name:    "protocol",
@@ -66,7 +69,6 @@ var Client = cli.Command{
 			Timeout:   c.Int("timeout"),
 		}
 
-		client.Run(ctx, cfg)
-		return nil
+		return client.Run(ctx, cfg)
 	},
 }
