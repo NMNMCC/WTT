@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -13,8 +14,6 @@ import (
 	"wtt/common"
 	"wtt/host"
 	"wtt/server"
-
-	"github.com/golang/glog"
 )
 
 func TestE2ETCP(t *testing.T) {
@@ -57,7 +56,7 @@ func TestE2ETCP(t *testing.T) {
 		}
 		if err := host.Run(mainCtx, hostCfg); err != nil {
 			// Don't fail the test here, as errors on shutdown are expected
-			glog.Infof("Host exited: %v", err)
+			slog.Info("Host exited", "error", err)
 		}
 	}()
 
@@ -79,7 +78,8 @@ func TestE2ETCP(t *testing.T) {
 			Timeout:   15,
 		}
 		if err := client.Run(mainCtx, clientCfg); err != nil {
-			glog.Fatalf("Client failed: %v", err)
+			// The client shouldn't fail unless there's a real issue.
+			t.Errorf("Client failed: %v", err)
 		}
 	}()
 
@@ -193,4 +193,134 @@ func startSignalingServer(ctx context.Context, wg *sync.WaitGroup, t *testing.T)
 		}
 	}
 	return "", fmt.Errorf("server did not start on %s", addr)
+}
+
+func TestE2EUDP(t *testing.T) {
+	// Main context for the entire test with a timeout
+	mainCtx, cancelAll := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelAll()
+
+	var wg sync.WaitGroup
+
+	// 1. Start a mock local service (a UDP echo server)
+	echoAddr, err := startUDPEchoServer(mainCtx, &wg, t)
+	if err != nil {
+		t.Fatalf("Failed to start UDP echo server: %v", err)
+	}
+	t.Logf("UDP Echo server listening on %s", echoAddr)
+
+	// 2. Start the signaling server
+	sigAddr, err := startSignalingServer(mainCtx, &wg, t)
+	if err != nil {
+		t.Fatalf("Failed to start signaling server: %v", err)
+	}
+	t.Logf("Signaling server listening on %s", sigAddr)
+
+	// Allow some time for servers to start
+	time.Sleep(100 * time.Millisecond)
+
+	hostID := "test-host-udp"
+	clientID := "test-client-udp"
+
+	// 3. Start the host
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		hostCfg := host.HostConfig{
+			ID:        hostID,
+			SigAddr:   "ws://" + sigAddr,
+			LocalAddr: echoAddr,
+			Protocol:  common.UDP,
+			Token:     "secret",
+		}
+		if err := host.Run(mainCtx, hostCfg); err != nil {
+			slog.Info("Host exited", "error", err)
+		}
+	}()
+
+	// Give the host a moment to register
+	time.Sleep(500 * time.Millisecond)
+
+	// 4. Start the client
+	clientListenAddr := "127.0.0.1:18081" // Use a different port
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		clientCfg := client.ClientConfig{
+			ID:        clientID,
+			HostID:    hostID,
+			SigAddr:   "ws://" + sigAddr,
+			LocalAddr: clientListenAddr,
+			Protocol:  common.UDP,
+			Token:     "secret",
+			Timeout:   15,
+		}
+		if err := client.Run(mainCtx, clientCfg); err != nil {
+			t.Errorf("Client failed: %v", err)
+		}
+	}()
+
+	// Allow time for WebRTC connection to establish
+	time.Sleep(2 * time.Second)
+
+	// 5. Test data transfer
+	localConn, err := net.Dial("udp", clientListenAddr)
+	if err != nil {
+		t.Fatalf("Failed to dial client listener: %v", err)
+	}
+	defer localConn.Close()
+
+	testMessage := "Hello, UDP Tunnel!"
+	t.Logf("Sending message: %s", testMessage)
+	_, err = localConn.Write([]byte(testMessage))
+	if err != nil {
+		t.Fatalf("Failed to write to client listener: %v", err)
+	}
+
+	buf := make([]byte, 1024)
+	readDeadline, _ := mainCtx.Deadline()
+	localConn.SetReadDeadline(readDeadline)
+	n, err := localConn.Read(buf)
+	if err != nil {
+		t.Fatalf("Failed to read from client listener: %v", err)
+	}
+
+	receivedMessage := string(buf[:n])
+	t.Logf("Received message: %s", receivedMessage)
+	if receivedMessage != testMessage {
+		t.Fatalf("Message mismatch: got '%s', want '%s'", receivedMessage, testMessage)
+	}
+
+	t.Log("E2E UDP test successful!")
+	cancelAll()
+	wg.Wait()
+}
+
+func startUDPEchoServer(ctx context.Context, wg *sync.WaitGroup, t *testing.T) (string, error) {
+	pconn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	addr := pconn.LocalAddr().String()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer pconn.Close()
+
+		go func() {
+			buf := make([]byte, 16384)
+			for {
+				n, raddr, err := pconn.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				pconn.WriteTo(buf[:n], raddr)
+			}
+		}()
+
+		<-ctx.Done()
+	}()
+
+	return addr, nil
 }

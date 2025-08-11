@@ -4,15 +4,31 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"wtt/common"
 
-	"github.com/golang/glog"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 )
+
+// threadSafeWriter protects the websocket connection from concurrent writes.
+type threadSafeWriter struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (t *threadSafeWriter) WriteJSON(v interface{}) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn.WriteJSON(v)
+}
+
+func newThreadSafeWriter(conn *websocket.Conn) *threadSafeWriter {
+	return &threadSafeWriter{conn: conn}
+}
 
 type HostConfig struct {
 	ID        string
@@ -26,7 +42,7 @@ type HostConfig struct {
 func Run(ctx context.Context, config HostConfig) error {
 	if config.ID == "" {
 		config.ID = uuid.NewString()
-		glog.Infof("No host ID provided, generated one: %s", config.ID)
+		slog.Info("No host ID provided, generated one", "id", config.ID)
 	}
 
 	wsc, err := common.WebSocketConn(config.SigAddr, config.Token)
@@ -35,18 +51,20 @@ func Run(ctx context.Context, config HostConfig) error {
 	}
 	defer wsc.Close()
 
+	safeWSC := newThreadSafeWriter(wsc)
+
 	// Register with the signaling server
-	regMsg := common.Message[any]{Type: common.Register, SenderID: config.ID}
-	if err := wsc.WriteJSON(regMsg); err != nil {
+	regMsg := common.TypedMessage[any]{Type: common.Register, SenderID: config.ID}
+	if err := safeWSC.WriteJSON(regMsg); err != nil {
 		return fmt.Errorf("failed to register host: %v", err)
 	}
-	glog.Infof("Host '%s' registered with signaling server.", config.ID)
+	slog.Info("Host registered with signaling server", "id", config.ID)
 
 	// Wait for offers and process them
-	return wait(ctx, wsc, config)
+	return wait(ctx, wsc, safeWSC, config)
 }
 
-func wait(ctx context.Context, wsc *websocket.Conn, cfg HostConfig) error {
+func wait(ctx context.Context, wsc *websocket.Conn, safeWSC *threadSafeWriter, cfg HostConfig) error {
 	var wg sync.WaitGroup
 	peerConnections := &sync.Map{} // string -> *webrtc.PeerConnection
 
@@ -69,7 +87,8 @@ func wait(ctx context.Context, wsc *websocket.Conn, cfg HostConfig) error {
 	for {
 		select {
 		case <-ctx.Done():
-			glog.Info("Host shutting down...")
+			slog.Info("Host shutting down...")
+			wg.Wait() // Wait for handlers to finish
 			peerConnections.Range(func(key, value interface{}) bool {
 				if pc, ok := value.(*webrtc.PeerConnection); ok {
 					pc.Close()
@@ -83,9 +102,9 @@ func wait(ctx context.Context, wsc *websocket.Conn, cfg HostConfig) error {
 			if p == nil {
 				return nil // Channel closed
 			}
-			var msg common.Message[any]
+			var msg common.Message
 			if err := json.Unmarshal(p, &msg); err != nil {
-				glog.Errorf("Failed to unmarshal message: %v", err)
+				slog.Error("Failed to unmarshal message", "error", err)
 				continue
 			}
 
@@ -94,7 +113,7 @@ func wait(ctx context.Context, wsc *websocket.Conn, cfg HostConfig) error {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					handleOffer(wsc, msg, cfg, peerConnections)
+					handleOffer(safeWSC, msg, cfg, peerConnections)
 				}()
 			case common.Candidate:
 				wg.Add(1)
@@ -103,24 +122,24 @@ func wait(ctx context.Context, wsc *websocket.Conn, cfg HostConfig) error {
 					handleCandidate(msg, peerConnections)
 				}()
 			default:
-				glog.Warningf("Unknown message type received: %v", msg.Type)
+				slog.Warn("Unknown message type received", "type", msg.Type)
 			}
 		}
 	}
 }
 
-func handleOffer(wsc *websocket.Conn, msg common.Message[any], cfg HostConfig, peerConnections *sync.Map) {
-	offer, err := common.ReUnmarshal[common.Message[common.OfferPayload]](msg)
-	if err != nil {
-		glog.Errorf("Failed to unmarshal offer message: %v", err)
+func handleOffer(wsc *threadSafeWriter, msg common.Message, cfg HostConfig, peerConnections *sync.Map) {
+	var offerPayload common.OfferPayload
+	if err := json.Unmarshal(msg.Payload, &offerPayload); err != nil {
+		slog.Error("Failed to unmarshal offer payload", "error", err)
 		return
 	}
 
-	clientID := offer.SenderID
-	glog.Infof("Received offer from client '%s'", clientID)
-	pc, err := answer(wsc, offer, cfg)
+	clientID := msg.SenderID
+	slog.Info("Received offer from client", "client_id", clientID)
+	pc, err := answer(wsc, clientID, offerPayload.SDP, cfg)
 	if err != nil {
-		glog.Errorf("Failed to create answer for '%s': %v", clientID, err)
+		slog.Error("Failed to create answer", "client_id", clientID, "error", err)
 		if pc != nil {
 			pc.Close()
 		}
@@ -130,70 +149,107 @@ func handleOffer(wsc *websocket.Conn, msg common.Message[any], cfg HostConfig, p
 	peerConnections.Store(clientID, pc)
 
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
-		glog.Infof("PeerConnection state with '%s' changed: %s", clientID, s.String())
+		slog.Info("PeerConnection state with client changed", "client_id", clientID, "state", s.String())
 		if s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateDisconnected {
 			peerConnections.Delete(clientID)
 		}
 	})
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		glog.Infof("DataChannel '%s' from '%s' opened", dc.Label(), clientID)
+		slog.Info("DataChannel from client opened", "label", dc.Label(), "client_id", clientID)
 		dc.OnOpen(func() {
 			bridgeDataChannel(dc, cfg, clientID)
 		})
 	})
 }
 
-func handleCandidate(msg common.Message[any], peerConnections *sync.Map) {
-	candidateMsg, err := common.ReUnmarshal[common.Message[common.CandidatePayload]](msg)
-	if err != nil {
-		glog.Errorf("Failed to unmarshal candidate message: %v", err)
+func handleCandidate(msg common.Message, peerConnections *sync.Map) {
+	var candidatePayload common.CandidatePayload
+	if err := json.Unmarshal(msg.Payload, &candidatePayload); err != nil {
+		slog.Error("Failed to unmarshal candidate payload", "error", err)
 		return
 	}
 
-	clientID := candidateMsg.SenderID
+	clientID := msg.SenderID
 	val, ok := peerConnections.Load(clientID)
 	if !ok {
-		glog.Warningf("Received candidate for unknown client: %s", clientID)
+		slog.Warn("Received candidate for unknown client", "client_id", clientID)
 		return
 	}
 	pc, ok := val.(*webrtc.PeerConnection)
 	if !ok {
-		glog.Errorf("Invalid type in peerConnections map for client: %s", clientID)
+		slog.Error("Invalid type in peerConnections map for client", "client_id", clientID)
 		return
 	}
 
-	if err := pc.AddICECandidate(candidateMsg.Payload.Candidate); err != nil {
-		glog.Errorf("Failed to add ICE candidate from '%s': %v", clientID, err)
+	if err := pc.AddICECandidate(candidatePayload.Candidate); err != nil {
+		slog.Error("Failed to add ICE candidate from client", "client_id", clientID, "error", err)
 	}
 }
 
 func bridgeDataChannel(dc *webrtc.DataChannel, cfg HostConfig, clientID string) {
-	glog.Infof("DataChannel '%s' from '%s' ready, bridging to local service.", dc.Label(), clientID)
-	var localConn net.Conn
-	var err error
+	slog.Info("DataChannel ready, bridging to local service.", "label", dc.Label(), "client_id", clientID)
+
 	switch cfg.Protocol {
 	case common.TCP:
-		localConn, err = net.Dial("tcp", cfg.LocalAddr)
+		localConn, err := net.Dial("tcp", cfg.LocalAddr)
+		if err != nil {
+			slog.Error("Failed to connect to local service", "local_addr", cfg.LocalAddr, "client_id", clientID, "error", err)
+			dc.Close()
+			return
+		}
+		slog.Info("Successfully connected to local service", "local_addr", cfg.LocalAddr, "client_id", clientID)
+		if err := common.BridgeStream(dc, localConn); err != nil {
+			slog.Error("Failed to bridge DataChannel", "client_id", clientID, "error", err)
+		}
 	case common.UDP:
-		localConn, err = net.Dial("udp", cfg.LocalAddr)
+		conn, err := net.Dial("udp", cfg.LocalAddr)
+		if err != nil {
+			slog.Error("Failed to connect to local service", "local_addr", cfg.LocalAddr, "client_id", clientID, "error", err)
+			dc.Close()
+			return
+		}
+		slog.Info("Successfully connected to local service", "local_addr", cfg.LocalAddr, "client_id", clientID)
+		bridgeDialedUDP(dc, conn)
 	default:
-		err = fmt.Errorf("unsupported protocol: %s", cfg.Protocol)
-	}
-
-	if err != nil {
-		glog.Errorf("Failed to connect to local service at %s for client '%s': %v", cfg.LocalAddr, clientID, err)
+		slog.Error("Unsupported protocol", "protocol", cfg.Protocol)
 		dc.Close()
-		return
-	}
-
-	glog.Infof("Successfully connected to local service at %s for client '%s'", cfg.LocalAddr, clientID)
-	if err := common.BridgeStream(dc, localConn); err != nil {
-		glog.Errorf("Failed to bridge DataChannel for '%s': %v", clientID, err)
 	}
 }
 
-func answer(wsc *websocket.Conn, offer common.Message[common.OfferPayload], cfg HostConfig) (*webrtc.PeerConnection, error) {
+// bridgeDialedUDP handles bridging for a dialed UDP connection, which behaves like a stream.
+func bridgeDialedUDP(dc *webrtc.DataChannel, localConn net.Conn) {
+	slog.Info("Bridging dialed UDP connection")
+
+	// Remote (DC) -> Local (echo server)
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if _, err := localConn.Write(msg.Data); err != nil {
+			slog.Warn("Failed to write to local UDP conn", "error", err)
+		}
+	})
+
+	// Local (echo server) -> Remote (DC)
+	go func() {
+		buf := make([]byte, 16384)
+		for {
+			n, err := localConn.Read(buf)
+			if err != nil {
+				slog.Warn("Failed to read from local UDP conn", "error", err)
+				dc.Close()
+				localConn.Close()
+				return
+			}
+			if err := dc.Send(buf[:n]); err != nil {
+				slog.Warn("Failed to send to DC", "error", err)
+				dc.Close()
+				localConn.Close()
+				return
+			}
+		}
+	}()
+}
+
+func answer(wsc *threadSafeWriter, clientID string, remoteSDP webrtc.SessionDescription, cfg HostConfig) (*webrtc.PeerConnection, error) {
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{{URLs: cfg.STUNAddrs}},
 	})
@@ -201,7 +257,6 @@ func answer(wsc *websocket.Conn, offer common.Message[common.OfferPayload], cfg 
 		return nil, fmt.Errorf("failed to create PeerConnection: %v", err)
 	}
 
-	clientID := offer.SenderID
 	hostID := cfg.ID
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -209,18 +264,18 @@ func answer(wsc *websocket.Conn, offer common.Message[common.OfferPayload], cfg 
 			return
 		}
 		payload := common.CandidatePayload{Candidate: c.ToJSON()}
-		msg := common.Message[common.CandidatePayload]{
+		msg := common.TypedMessage[common.CandidatePayload]{
 			Type:     common.Candidate,
 			Payload:  payload,
 			TargetID: clientID,
 			SenderID: hostID,
 		}
 		if err := wsc.WriteJSON(msg); err != nil {
-			glog.Errorf("Failed to send ICE candidate to '%s': %v", clientID, err)
+			slog.Error("Failed to send ICE candidate to client", "client_id", clientID, "error", err)
 		}
 	})
 
-	if err := pc.SetRemoteDescription(offer.Payload.SDP); err != nil {
+	if err := pc.SetRemoteDescription(remoteSDP); err != nil {
 		return pc, fmt.Errorf("failed to set remote description: %w", err)
 	}
 
@@ -233,7 +288,7 @@ func answer(wsc *websocket.Conn, offer common.Message[common.OfferPayload], cfg 
 		return pc, fmt.Errorf("failed to set local description: %w", err)
 	}
 
-	answerMsg := common.Message[common.AnswerPayload]{
+	answerMsg := common.TypedMessage[common.AnswerPayload]{
 		Type:     common.Answer,
 		Payload:  common.AnswerPayload{SDP: ans},
 		TargetID: clientID,
@@ -243,6 +298,6 @@ func answer(wsc *websocket.Conn, offer common.Message[common.OfferPayload], cfg 
 		return pc, fmt.Errorf("failed to send answer to '%s': %w", clientID, err)
 	}
 
-	glog.Infof("Sent answer to client '%s'", clientID)
+	slog.Info("Sent answer to client", "client_id", clientID)
 	return pc, nil
 }

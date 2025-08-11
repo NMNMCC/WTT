@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -28,8 +29,7 @@ func main() {
 	}
 
 	if err := app.Run(ctx, os.Args); err != nil {
-		// The glog library logs to stderr by default.
-		// We can just exit here. The error will be visible.
+		slog.Error("application failed", "error", err)
 		os.Exit(1)
 	}
 }

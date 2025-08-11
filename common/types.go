@@ -7,8 +7,3 @@ const (
 	TCP Protocol = "tcp"
 	UDP Protocol = "udp"
 )
-
-type Tunnel struct {
-	Initiator  string // ID
-	Respondent string // ID
-}

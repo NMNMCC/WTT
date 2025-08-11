@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -10,7 +11,6 @@ import (
 	"time"
 	"wtt/common"
 
-	"github.com/golang/glog"
 	"github.com/gorilla/websocket"
 )
 
@@ -28,27 +28,27 @@ func Run(ctx context.Context, cfg ServerConfig) error {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			glog.Warningf("Rejecting connection from %s: missing authorization header", r.RemoteAddr)
+			slog.Warn("Rejecting connection: missing authorization header", "remote_addr", r.RemoteAddr)
 			return
 		}
 
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			glog.Warningf("Rejecting connection from %s: invalid authorization header format", r.RemoteAddr)
+			slog.Warn("Rejecting connection: invalid authorization header format", "remote_addr", r.RemoteAddr)
 			return
 		}
 		token := parts[1]
 
 		if !slices.Contains(cfg.Tokens, token) {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			glog.Warningf("Rejecting unauthorized connection from %s", r.RemoteAddr)
+			slog.Warn("Rejecting unauthorized connection", "remote_addr", r.RemoteAddr)
 			return
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			glog.Errorf("Failed to upgrade connection: %v", err)
+			slog.Error("Failed to upgrade connection", "error", err)
 			return
 		}
 
@@ -60,13 +60,13 @@ func Run(ctx context.Context, cfg ServerConfig) error {
 	// Goroutine for graceful shutdown
 	go func() {
 		<-ctx.Done()
-		glog.Info("Shutting down signaling server...")
+		slog.Info("Shutting down signaling server...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdownCtx)
 	}()
 
-	glog.Infof("Signaling server starting on %s", cfg.ListenAddr)
+	slog.Info("Signaling server starting", "addr", cfg.ListenAddr)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		return err
 	}
@@ -75,27 +75,27 @@ func Run(ctx context.Context, cfg ServerConfig) error {
 }
 
 func HandleConnection(conn *websocket.Conn, connM *sync.Map) {
-	var initialMsg common.Message[any]
+	var initialMsg common.Message
 	if err := conn.ReadJSON(&initialMsg); err != nil {
-		glog.Errorf("Failed to read initial message: %v", err)
+		slog.Error("Failed to read initial message", "error", err)
 		conn.Close()
 		return
 	}
 
 	senderID := initialMsg.SenderID
 	if senderID == "" {
-		glog.Errorf("Initial message is missing sender ID")
+		slog.Error("Initial message is missing sender ID")
 		conn.Close()
 		return
 	}
 
 	connM.Store(senderID, conn)
-	glog.Infof("Client '%s' connected", senderID)
+	slog.Info("Client connected", "client_id", senderID)
 
 	defer func() {
 		connM.Delete(senderID)
 		conn.Close()
-		glog.Infof("Client '%s' disconnected", senderID)
+		slog.Info("Client disconnected", "client_id", senderID)
 	}()
 
 	if initialMsg.TargetID != "" {
@@ -106,14 +106,14 @@ func HandleConnection(conn *websocket.Conn, connM *sync.Map) {
 		_, p, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				glog.Errorf("Error reading message from %s: %v", senderID, err)
+				slog.Error("Error reading message", "sender_id", senderID, "error", err)
 			}
 			break
 		}
 
-		var msg common.Message[any]
+		var msg common.Message
 		if err := json.Unmarshal(p, &msg); err != nil {
-			glog.Errorf("Failed to unmarshal message from %s: %v", senderID, err)
+			slog.Error("Failed to unmarshal message", "sender_id", senderID, "error", err)
 			continue
 		}
 
@@ -121,26 +121,26 @@ func HandleConnection(conn *websocket.Conn, connM *sync.Map) {
 	}
 }
 
-func forwardMessage(msg common.Message[any], connM *sync.Map) {
+func forwardMessage(msg common.Message, connM *sync.Map) {
 	targetID := msg.TargetID
 	if targetID == "" {
-		glog.Warningf("Message from %s has no target ID, dropping", msg.SenderID)
+		slog.Warn("Message has no target ID, dropping", "sender_id", msg.SenderID)
 		return
 	}
 
 	targetConn, ok := connM.Load(targetID)
 	if !ok {
-		glog.Errorf("Connection not found for target ID %s (from sender %s)", targetID, msg.SenderID)
+		slog.Error("Connection not found for target", "target_id", targetID, "sender_id", msg.SenderID)
 		return
 	}
 
 	wsConn, ok := targetConn.(*websocket.Conn)
 	if !ok {
-		glog.Errorf("Invalid connection type in map for target ID %s", targetID)
+		slog.Error("Invalid connection type in map", "target_id", targetID)
 		return
 	}
 
 	if err := wsConn.WriteJSON(msg); err != nil {
-		glog.Errorf("Failed to forward message to %s: %v", targetID, err)
+		slog.Error("Failed to forward message", "target_id", targetID, "error", err)
 	}
 }

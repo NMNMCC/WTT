@@ -71,13 +71,13 @@ func TestServer(t *testing.T) {
 		defer connB.Close()
 
 		// Register Client A
-		regA := common.Message[any]{SenderID: "clientA"}
+		regA := common.TypedMessage[any]{SenderID: "clientA"}
 		if err := connA.WriteJSON(regA); err != nil {
 			t.Fatalf("Client A failed to register: %v", err)
 		}
 
 		// Register Client B
-		regB := common.Message[any]{SenderID: "clientB"}
+		regB := common.TypedMessage[any]{SenderID: "clientB"}
 		if err := connB.WriteJSON(regB); err != nil {
 			t.Fatalf("Client B failed to register: %v", err)
 		}
@@ -87,13 +87,11 @@ func TestServer(t *testing.T) {
 
 		// A -> B
 		msgBody := "hello from A"
-		// Use a concrete type for payload for proper JSON marshaling
-		payload, _ := json.Marshal(msgBody)
-		msg := common.Message[json.RawMessage]{
+		msg := common.TypedMessage[string]{
 			SenderID: "clientA",
 			TargetID: "clientB",
 			Type:     "test",
-			Payload:  payload,
+			Payload:  msgBody,
 		}
 		err = connA.WriteJSON(msg)
 		if err != nil {
@@ -102,14 +100,19 @@ func TestServer(t *testing.T) {
 
 		// B receives
 		connB.SetReadDeadline(time.Now().Add(2 * time.Second))
-		var receivedMsg common.Message[string]
+		var receivedMsg common.Message
 		err = connB.ReadJSON(&receivedMsg)
 		if err != nil {
 			t.Fatalf("Client B failed to receive message: %v", err)
 		}
 
-		if receivedMsg.Payload != msgBody {
-			t.Fatalf("Message mismatch: got '%s', want '%s'", receivedMsg.Payload, msgBody)
+		var receivedPayload string
+		if err := json.Unmarshal(receivedMsg.Payload, &receivedPayload); err != nil {
+			t.Fatalf("Failed to unmarshal received payload: %v", err)
+		}
+
+		if receivedPayload != msgBody {
+			t.Fatalf("Message mismatch: got '%s', want '%s'", receivedPayload, msgBody)
 		}
 	})
 }

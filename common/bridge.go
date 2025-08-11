@@ -1,9 +1,12 @@
 package common
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"sync"
 
 	"github.com/pion/webrtc/v4"
 )
@@ -48,40 +51,41 @@ func BridgeStream(dc *webrtc.DataChannel, local net.Conn) error {
 }
 
 // BridgePacket wires a WebRTC DataChannel with a packet-oriented net.PacketConn (like UDP) bidirectionally.
-// It starts a goroutine for local->remote and configures remote->local handler.
-// Caller owns pconn lifetime; handlers will close on errors.
+// It blocks until the bridge is closed.
 func BridgePacket(dc *webrtc.DataChannel, pconn net.PacketConn) error {
-	var returnAddr net.Addr
-	errc := make(chan error, 1)
-
+	ctx, cancel := context.WithCancel(context.Background())
+	var closeOnce sync.Once
 	closer := func() {
-		pconn.Close()
-		dc.Close()
+		closeOnce.Do(func() {
+			pconn.Close()
+			dc.Close()
+			cancel()
+		})
 	}
+
+	var returnAddr net.Addr
+	var mu sync.Mutex
 
 	// Local -> Remote
 	go func() {
+		defer closer()
 		buf := make([]byte, 16384)
 		for {
 			n, addr, err := pconn.ReadFrom(buf)
 			if err != nil {
-				select {
-				case errc <- fmt.Errorf("read from packet conn: %w", err):
-				default:
+				if err != io.EOF {
+					slog.Warn("Failed to read from packet conn, closing bridge", "error", err)
 				}
-				closer()
 				return
 			}
+			mu.Lock()
 			if returnAddr == nil {
 				returnAddr = addr
 			}
+			mu.Unlock()
 			if n > 0 {
 				if err := dc.Send(buf[:n]); err != nil {
-					select {
-					case errc <- fmt.Errorf("send to dc: %w", err):
-					default:
-					}
-					closer()
+					slog.Warn("Failed to send to dc", "error", err)
 					return
 				}
 			}
@@ -90,21 +94,25 @@ func BridgePacket(dc *webrtc.DataChannel, pconn net.PacketConn) error {
 
 	// Remote -> Local
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		if returnAddr == nil {
+		mu.Lock()
+		addr := returnAddr
+		mu.Unlock()
+		if addr == nil {
 			// We don't know where to send the packet yet.
+			slog.Warn("Dropping packet, no return address yet")
 			return
 		}
-		if _, err := pconn.WriteTo(msg.Data, returnAddr); err != nil {
-			select {
-			case errc <- fmt.Errorf("write to packet conn: %w", err):
-			default:
-			}
+		if _, err := pconn.WriteTo(msg.Data, addr); err != nil {
+			slog.Warn("Failed to write to packet conn, closing bridge", "error", err)
 			closer()
 		}
 	})
 
-	// Cleanup
-	dc.OnClose(closer)
+	dc.OnClose(func() {
+		slog.Info("DataChannel closed, closing bridge")
+		closer()
+	})
 
-	return <-errc
+	<-ctx.Done()
+	return nil
 }
