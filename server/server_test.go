@@ -5,16 +5,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 	"wtt/common"
+
+	cmap "github.com/orcaman/concurrent-map/v2"
 
 	"github.com/gorilla/websocket"
 )
 
 func TestServer(t *testing.T) {
-	connM := &sync.Map{}
+	connM := cmap.New[*websocket.Conn]()
 	upgrader := websocket.Upgrader{}
 
 	// Create a test server using the real HandleConnection logic

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -66,7 +67,7 @@ func Run(ctx context.Context, config HostConfig) error {
 
 func wait(ctx context.Context, wsc *websocket.Conn, safeWSC *threadSafeWriter, cfg HostConfig) error {
 	var wg sync.WaitGroup
-	peerConnections := &sync.Map{} // string -> *webrtc.PeerConnection
+	peerConnections := cmap.New[*webrtc.PeerConnection]()
 
 	msgChan := make(chan []byte)
 	errChan := make(chan error, 1)
@@ -89,12 +90,9 @@ func wait(ctx context.Context, wsc *websocket.Conn, safeWSC *threadSafeWriter, c
 		case <-ctx.Done():
 			slog.Info("Host shutting down...")
 			wg.Wait() // Wait for handlers to finish
-			peerConnections.Range(func(key, value interface{}) bool {
-				if pc, ok := value.(*webrtc.PeerConnection); ok {
-					pc.Close()
-				}
-				return true
-			})
+			for item := range peerConnections.IterBuffered() {
+				item.Val.Close()
+			}
 			return nil
 		case err := <-errChan:
 			return fmt.Errorf("error reading from websocket: %w", err)
@@ -128,7 +126,7 @@ func wait(ctx context.Context, wsc *websocket.Conn, safeWSC *threadSafeWriter, c
 	}
 }
 
-func handleOffer(wsc *threadSafeWriter, msg common.Message, cfg HostConfig, peerConnections *sync.Map) {
+func handleOffer(wsc *threadSafeWriter, msg common.Message, cfg HostConfig, peerConnections cmap.ConcurrentMap[string, *webrtc.PeerConnection]) {
 	var offerPayload common.OfferPayload
 	if err := json.Unmarshal(msg.Payload, &offerPayload); err != nil {
 		slog.Error("Failed to unmarshal offer payload", "error", err)
@@ -146,12 +144,12 @@ func handleOffer(wsc *threadSafeWriter, msg common.Message, cfg HostConfig, peer
 		return
 	}
 
-	peerConnections.Store(clientID, pc)
+	peerConnections.Set(clientID, pc)
 
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		slog.Info("PeerConnection state with client changed", "client_id", clientID, "state", s.String())
 		if s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateDisconnected {
-			peerConnections.Delete(clientID)
+			peerConnections.Remove(clientID)
 		}
 	})
 
@@ -163,7 +161,7 @@ func handleOffer(wsc *threadSafeWriter, msg common.Message, cfg HostConfig, peer
 	})
 }
 
-func handleCandidate(msg common.Message, peerConnections *sync.Map) {
+func handleCandidate(msg common.Message, peerConnections cmap.ConcurrentMap[string, *webrtc.PeerConnection]) {
 	var candidatePayload common.CandidatePayload
 	if err := json.Unmarshal(msg.Payload, &candidatePayload); err != nil {
 		slog.Error("Failed to unmarshal candidate payload", "error", err)
@@ -171,14 +169,9 @@ func handleCandidate(msg common.Message, peerConnections *sync.Map) {
 	}
 
 	clientID := msg.SenderID
-	val, ok := peerConnections.Load(clientID)
+	pc, ok := peerConnections.Get(clientID)
 	if !ok {
 		slog.Warn("Received candidate for unknown client", "client_id", clientID)
-		return
-	}
-	pc, ok := val.(*webrtc.PeerConnection)
-	if !ok {
-		slog.Error("Invalid type in peerConnections map for client", "client_id", clientID)
 		return
 	}
 

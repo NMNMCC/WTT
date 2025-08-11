@@ -7,9 +7,10 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 	"wtt/common"
+
+	cmap "github.com/orcaman/concurrent-map/v2"
 
 	"github.com/gorilla/websocket"
 )
@@ -20,7 +21,7 @@ type ServerConfig struct {
 }
 
 func Run(ctx context.Context, cfg ServerConfig) error {
-	connM := &sync.Map{}
+	connM := cmap.New[*websocket.Conn]()
 	upgrader := websocket.Upgrader{}
 
 	mux := http.NewServeMux()
@@ -74,7 +75,7 @@ func Run(ctx context.Context, cfg ServerConfig) error {
 	return nil
 }
 
-func HandleConnection(conn *websocket.Conn, connM *sync.Map) {
+func HandleConnection(conn *websocket.Conn, connM cmap.ConcurrentMap[string, *websocket.Conn]) {
 	var initialMsg common.Message
 	if err := conn.ReadJSON(&initialMsg); err != nil {
 		slog.Error("Failed to read initial message", "error", err)
@@ -89,11 +90,11 @@ func HandleConnection(conn *websocket.Conn, connM *sync.Map) {
 		return
 	}
 
-	connM.Store(senderID, conn)
+	connM.Set(senderID, conn)
 	slog.Info("Client connected", "client_id", senderID)
 
 	defer func() {
-		connM.Delete(senderID)
+		connM.Remove(senderID)
 		conn.Close()
 		slog.Info("Client disconnected", "client_id", senderID)
 	}()
@@ -121,22 +122,16 @@ func HandleConnection(conn *websocket.Conn, connM *sync.Map) {
 	}
 }
 
-func forwardMessage(msg common.Message, connM *sync.Map) {
+func forwardMessage(msg common.Message, connM cmap.ConcurrentMap[string, *websocket.Conn]) {
 	targetID := msg.TargetID
 	if targetID == "" {
 		slog.Warn("Message has no target ID, dropping", "sender_id", msg.SenderID)
 		return
 	}
 
-	targetConn, ok := connM.Load(targetID)
+	wsConn, ok := connM.Get(targetID)
 	if !ok {
 		slog.Error("Connection not found for target", "target_id", targetID, "sender_id", msg.SenderID)
-		return
-	}
-
-	wsConn, ok := targetConn.(*websocket.Conn)
-	if !ok {
-		slog.Error("Invalid connection type in map", "target_id", targetID)
 		return
 	}
 
