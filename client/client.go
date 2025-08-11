@@ -25,7 +25,7 @@ type ClientConfig struct {
 	Timeout   int // seconds
 }
 
-func check(cfg ClientConfig) error {
+func (cfg ClientConfig) Validate() error {
 	if cfg.HostID == "" {
 		return fmt.Errorf("client mode requires a target host ID")
 	}
@@ -38,11 +38,14 @@ func check(cfg ClientConfig) error {
 	if cfg.Protocol != common.TCP && cfg.Protocol != common.UDP {
 		return fmt.Errorf("unsupported protocol: %s", cfg.Protocol)
 	}
+	if cfg.Timeout <= 0 {
+		return fmt.Errorf("timeout must be positive, got: %d", cfg.Timeout)
+	}
 	return nil
 }
 
 func Run(cfg ClientConfig) {
-	err := check(cfg)
+	err := cfg.Validate()
 	if err != nil {
 		glog.Errorf("invalid client configuration: %v", err)
 		return
@@ -92,16 +95,25 @@ func emit(wsc *websocket.Conn, st []string, clientID, hostID string, timeout tim
 		_ = wsc.WriteJSON(cand)
 	})
 
-	ld := pc.LocalDescription()
-	offer := common.Message[common.OfferPayload]{
+	// Create and set local description before accessing it
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create offer: %v", err)
+	}
+	
+	if err := pc.SetLocalDescription(offer); err != nil {
+		return nil, fmt.Errorf("failed to set local description: %v", err)
+	}
+
+	offerMsg := common.Message[common.OfferPayload]{
 		Type: common.Offer,
 		Payload: common.OfferPayload{
-			SDP: *ld,
+			SDP: offer,
 		},
 		TargetID: hostID,
 		SenderID: clientID,
 	}
-	_ = wsc.WriteJSON(offer)
+	_ = wsc.WriteJSON(offerMsg)
 
 	connected := make(chan struct{})
 	pc.OnConnectionStateChange(func(pcs webrtc.PeerConnectionState) {

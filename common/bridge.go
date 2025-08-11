@@ -11,9 +11,12 @@ import (
 func Bridge(protocol Protocol, dc *webrtc.DataChannel) error {
 	switch protocol {
 	case TCP:
-		return BridgeStream(dc, &net.TCPConn{})
+		// Connect to the local service address that should be configured elsewhere
+		// This function needs the target address to be useful
+		return fmt.Errorf("Bridge function requires target address - use BridgeStream with actual connection")
 	case UDP:
-		return BridgePacket(dc, &net.UDPConn{})
+		// Similar issue - needs actual packet connection
+		return fmt.Errorf("Bridge function requires target address - use BridgePacket with actual connection")
 	}
 	return fmt.Errorf("unsupported protocol: %s", protocol)
 }

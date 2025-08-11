@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -16,14 +17,41 @@ type ServerConfig struct {
 	Tokens     []string
 }
 
+func (cfg ServerConfig) Validate() error {
+	if cfg.ListenAddr == "" {
+		return fmt.Errorf("listen address is required")
+	}
+	if len(cfg.Tokens) == 0 {
+		return fmt.Errorf("at least one authentication token is required")
+	}
+	return nil
+}
+
 func Run(cfg ServerConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid server configuration: %v", err)
+	}
 	connM := hashmap.New[string, *websocket.Conn]()
 
 	upgrader := websocket.Upgrader{}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		token := strings.Split(r.Header.Get("Authorization"), " ")[1]
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			http.Error(w, "Unauthorized: Missing Authorization header", http.StatusUnauthorized)
+			glog.Warningf("Rejecting connection from %s: missing Authorization header", r.RemoteAddr)
+			return
+		}
+		
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			http.Error(w, "Unauthorized: Invalid Authorization header format", http.StatusUnauthorized)
+			glog.Warningf("Rejecting connection from %s: invalid Authorization header format", r.RemoteAddr)
+			return
+		}
+		
+		token := parts[1]
 		if !slices.Contains(cfg.Tokens, token) {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			glog.Warningf("Rejecting unauthorized connection from %s", r.RemoteAddr)

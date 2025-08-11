@@ -2,6 +2,7 @@ package host
 
 import (
 	"fmt"
+	"net"
 
 	"wtt/common"
 
@@ -19,7 +20,26 @@ type HostConfig struct {
 	Token     string
 }
 
+func (cfg HostConfig) Validate() error {
+	if cfg.ID == "" {
+		return fmt.Errorf("host ID is required")
+	}
+	if cfg.SigAddr == "" {
+		return fmt.Errorf("signaling server address is required")
+	}
+	if cfg.LocalAddr == "" {
+		return fmt.Errorf("local address is required")
+	}
+	if cfg.Protocol != common.TCP && cfg.Protocol != common.UDP {
+		return fmt.Errorf("protocol must be 'tcp' or 'udp', got: %s", cfg.Protocol)
+	}
+	return nil
+}
+
 func Run(config HostConfig) error {
+	if err := config.Validate(); err != nil {
+		return fmt.Errorf("invalid host configuration: %v", err)
+	}
 	wsc, err := common.WebSocketConn(config.SigAddr, config.Token)
 	if err != nil {
 		glog.Fatalf("failed to connect to signaling server: %v", err)
@@ -43,9 +63,30 @@ func Run(config HostConfig) error {
 			glog.Infof("DataChannel '%s' opened (ID=%d)", dc.Label(), *dc.ID())
 
 			dc.OnOpen(func() {
-				err := common.Bridge(config.Protocol, dc)
-				if err != nil {
-					glog.Errorf("failed to bridge DataChannel '%s': %v", dc.Label(), err)
+				// Bridge to the configured local address
+				switch config.Protocol {
+				case common.TCP:
+					localConn, err := net.Dial(string(common.TCP), config.LocalAddr)
+					if err != nil {
+						glog.Errorf("failed to connect to local address %s: %v", config.LocalAddr, err)
+						return
+					}
+					if err := common.BridgeStream(dc, localConn); err != nil {
+						glog.Errorf("failed to bridge DataChannel '%s': %v", dc.Label(), err)
+						return
+					}
+				case common.UDP:
+					localConn, err := net.ListenPacket(string(common.UDP), config.LocalAddr)
+					if err != nil {
+						glog.Errorf("failed to listen on local address %s: %v", config.LocalAddr, err)
+						return
+					}
+					if err := common.BridgePacket(dc, localConn); err != nil {
+						glog.Errorf("failed to bridge DataChannel '%s': %v", dc.Label(), err)
+						return
+					}
+				default:
+					glog.Errorf("unsupported protocol: %s", config.Protocol)
 					return
 				}
 				glog.Infof("DataChannel '%s' bridged successfully", dc.Label())
