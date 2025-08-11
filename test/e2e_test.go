@@ -65,7 +65,7 @@ func TestE2ETCP(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// 4. Start the client
-	clientListenAddr := "127.0.0.1:10808"
+	clientListenAddr := "127.0.0.1:18080"
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
