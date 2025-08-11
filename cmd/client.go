@@ -66,8 +66,7 @@ var Client = cli.Command{
 			Timeout:   c.Int("timeout"),
 		}
 
-		client.Run(cfg)
-
-		select {}
+		client.Run(ctx, cfg)
+		return nil
 	},
 }
