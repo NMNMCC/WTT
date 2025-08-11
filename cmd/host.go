@@ -55,6 +55,6 @@ var Host = cli.Command{
 			Token:     c.String("token"),
 		}
 
-		return host.Run(cfg)
+		return host.Run(ctx, cfg)
 	},
 }

@@ -27,7 +27,7 @@ var Server = cli.Command{
 			ListenAddr: c.String("listen"),
 			Tokens:     normalizeTokens(c.StringSlice("tokens")),
 		}
-		return server.Run(cfg)
+		return server.Run(ctx, cfg)
 	},
 }
 
