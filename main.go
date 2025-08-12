@@ -8,6 +8,8 @@ import (
 	"github.com/alecthomas/kong"
 )
 
+// CLI defines the command-line interface of the application, using kong for parsing.
+// It has three main subcommands: client, host, and server.
 type CLI struct {
 	Client cmd.ClientCmd `cmd:"" help:"Run client."`
 	Host   cmd.HostCmd   `cmd:"" help:"Run host."`
