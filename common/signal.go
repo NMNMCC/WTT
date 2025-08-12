@@ -1,52 +1,39 @@
 package common
 
 import (
-	"encoding/json"
-	"fmt"
-
 	"github.com/pion/webrtc/v4"
 )
 
-type MessageType string
+type RTCMessageType string
 
 const (
-	Register  MessageType = "register"
-	Offer     MessageType = "offer"
-	Answer    MessageType = "answer"
-	Candidate MessageType = "candidate"
+	RTCRegister  RTCMessageType = "register"
+	RTCOffer     RTCMessageType = "offer"
+	RTCAnswer    RTCMessageType = "answer"
+	RTCCandidate RTCMessageType = "candidate"
 )
 
-type OfferPayload struct {
+type RTCRegisterPayload struct {
+	ID string `json:"id"`
+}
+
+type RTCOfferPayload struct {
 	SDP webrtc.SessionDescription `json:"sdp"`
 }
 
-type AnswerPayload struct {
+type RTCAnswerPayload struct {
 	SDP webrtc.SessionDescription `json:"sdp"`
 }
 
-type CandidatePayload struct {
+type RTCCandidatePayload struct {
 	Candidate webrtc.ICECandidateInit `json:"candidate"`
 }
 
-type Message[P Payload] struct {
-	Type     MessageType `json:"type"`
-	Payload  P           `json:"payload"`
-	TargetID string      `json:"target_id"`
-	SenderID string      `json:"sender_id"`
+type RTCMessage[P RTCPayload] struct {
+	Type    RTCMessageType `json:"type"`
+	Payload P              `json:"payload"`
 }
 
-type Payload interface {
-	OfferPayload | AnswerPayload | CandidatePayload | any
-}
-
-func ReUnmarshal[T any](j any) (T, error) {
-	var payload T
-	b, err := json.Marshal(j)
-	if err != nil {
-		return payload, fmt.Errorf("failed to marshal json: %w", err)
-	}
-	if err := json.Unmarshal(b, &payload); err != nil {
-		return payload, fmt.Errorf("failed to unmarshal json into %T: %w", payload, err)
-	}
-	return payload, nil
+type RTCPayload interface {
+	RTCRegisterPayload | RTCOfferPayload | RTCAnswerPayload | RTCCandidatePayload | any
 }

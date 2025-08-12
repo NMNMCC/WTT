@@ -3,24 +3,38 @@ package common
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 
 	"github.com/pion/webrtc/v4"
 )
 
-func Bridge(protocol Protocol, dc *webrtc.DataChannel) error {
+func Bridge(protocol Protocol, localAddr string, dc *webrtc.DataChannel) error {
 	switch protocol {
 	case TCP:
-		return BridgeStream(dc, &net.TCPConn{})
+		conn, err := net.Dial("tcp", localAddr)
+		if err != nil {
+			return fmt.Errorf("failed to connect to TCP address %s: %w", localAddr, err)
+		}
+		defer conn.Close()
+		return BridgeStream(dc, conn)
 	case UDP:
-		return BridgePacket(dc, &net.UDPConn{})
+		conn, err := net.ListenPacket("udp", localAddr)
+		if err != nil {
+			return fmt.Errorf("failed to listen on UDP address %s: %w", localAddr, err)
+		}
+		defer conn.Close()
+		return BridgePacket(dc, conn)
 	}
+
 	return fmt.Errorf("unsupported protocol: %s", protocol)
 }
 
 // BridgeStream wires a WebRTC DataChannel with a stream-oriented net.Conn (like TCP) bidirectionally.
 // It installs the DataChannel handlers and blocks pumping local->remote until EOF/error.
 func BridgeStream(dc *webrtc.DataChannel, local net.Conn) error {
+	slog.Info("Bridging DataChannel with local connection", "label", dc.Label(), "localAddr", local.RemoteAddr().String())
+
 	if dc == nil || local == nil {
 		return fmt.Errorf("nil data channel or local conn")
 	}
@@ -66,6 +80,8 @@ func BridgeStream(dc *webrtc.DataChannel, local net.Conn) error {
 // It starts a goroutine for local->remote and configures remote->local handler.
 // Caller owns pconn lifetime; handlers will close on errors.
 func BridgePacket(dc *webrtc.DataChannel, pconn net.PacketConn) error {
+	slog.Info("Bridging DataChannel with packet connection", "label", dc.Label(), "localAddr", pconn.LocalAddr().String())
+
 	var returnAddr net.Addr
 	errc := make(chan error)
 

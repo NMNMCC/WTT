@@ -1,26 +1,28 @@
 package main
 
 import (
-	"context"
+	"fmt"
 	"os"
 	"wtt/cmd"
 
-	"github.com/urfave/cli/v3"
+	"github.com/alecthomas/kong"
 )
 
+type CLI struct {
+	Client cmd.ClientCmd `cmd:"" help:"Run client."`
+	Host   cmd.HostCmd   `cmd:"" help:"Run host."`
+	Server cmd.ServerCmd `cmd:"" help:"Run signaling server."`
+}
+
 func main() {
-	app := cli.Command{
-		UseShortOptionHandling: true,
-
-		Name:        "WTT",
-		Description: "Simple WebRTC Tunnel",
-
-		Commands: []*cli.Command{
-			&cmd.Client,
-			&cmd.Host,
-			&cmd.Server,
-		},
+	var cli CLI
+	k := kong.Parse(&cli,
+		kong.Name("WTT"),
+		kong.Description("Simple WebRTC Tunnel"),
+		kong.UsageOnError(),
+	)
+	if err := k.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-
-	app.Run(context.Background(), os.Args)
 }

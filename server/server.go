@@ -1,66 +1,59 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
-	"slices"
-	"strings"
 	"wtt/common"
 
 	"github.com/cornelk/hashmap"
-	"github.com/golang/glog"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
-type ServerConfig struct {
-	ListenAddr string
-	Tokens     []string
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
 }
 
-func Run(cfg ServerConfig) error {
-	connM := hashmap.New[string, *websocket.Conn]()
+func Run(ctx context.Context, listenAddr string, tokens []string, maxMsgSize int64) <-chan error {
+	connM := hashmap.New[string, *common.RWLock[*websocket.Conn]]()
 
-	upgrader := websocket.Upgrader{}
+	ec := make(chan error)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		token := strings.Split(r.Header.Get("Authorization"), " ")[1]
-		if !slices.Contains(cfg.Tokens, token) {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			glog.Warningf("Rejecting unauthorized connection from %s", r.RemoteAddr)
-			return
-		}
+	srv := http.NewServeMux()
 
+	srv.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			glog.Errorf("Failed to upgrade connection: %v", err)
-			return
+			ec <- err
+		}
+		defer conn.Close()
+		conn.SetReadLimit(maxMsgSize)
+		id, err := uuid.NewRandom()
+		if err != nil {
+			ec <- err
+		}
+		connM.Set(id.String(), common.NewRWLock(conn))
+
+		var anyM common.WebSocketForwardMessageContainer[json.RawMessage]
+		if err := conn.ReadJSON(&anyM); err != nil {
+			ec <- err
 		}
 
-		var msg common.Message[any]
-		if err := conn.ReadJSON(&msg); err != nil {
-			glog.Errorf("Failed to read initial message: %v", err)
-			return
+		if conn, ok := connM.Get(anyM.ReceiverID); ok {
+			go conn.Write(func(c *websocket.Conn) {
+				if err := c.WriteJSON(anyM.Content); err != nil {
+					ec <- err
+				}
+			})
 		}
-
-		connM.Set(msg.SenderID, conn)
-		conn.SetCloseHandler(func(code int, text string) error {
-			connM.Del(msg.SenderID)
-			return nil
-		})
-
-		conn, ok := connM.Get(msg.TargetID)
-		if !ok {
-			glog.Errorf("Connection not found for target ID %s", msg.TargetID)
-			return
-		}
-		if msg.TargetID != "" {
-			conn.WriteJSON(msg)
-		}
-
 	})
 
-	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
+	err := http.ListenAndServe(listenAddr, srv)
+	if err != nil {
+		ec <- err
+	}
 
-	glog.Infof("Signaling server starting on %s", cfg.ListenAddr)
-	return srv.ListenAndServe()
+	return ec
 }

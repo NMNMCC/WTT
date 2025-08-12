@@ -2,43 +2,23 @@ package cmd
 
 import (
 	"context"
-	"strings"
 	"wtt/server"
-
-	"github.com/urfave/cli/v3"
 )
 
-var Server = cli.Command{
-	Name: "server",
-	Flags: []cli.Flag{
-		&cli.StringFlag{
-			Name:    "listen",
-			Aliases: []string{"L"},
-			Value:   ":8080",
-		},
-		&cli.StringSliceFlag{
-			Name:        "tokens",
-			Aliases:     []string{"t"},
-			DefaultText: "token1,token2",
-		},
-	},
-	Action: func(ctx context.Context, c *cli.Command) error {
-		cfg := server.ServerConfig{
-			ListenAddr: c.String("listen"),
-			Tokens:     normalizeTokens(c.StringSlice("tokens")),
-		}
-		return server.Run(cfg)
-	},
+// ServerCmd represents the server command with its flags.
+type ServerCmd struct {
+	Listen     string   `name:"listen" short:"l" default:":8080" help:"Listen address for signaling server."`
+	Tokens     []string `name:"tokens" short:"t" help:"Allowed tokens for authentication."`
+	MaxMsgSize int64    `name:"max-msg-size" default:"1048576" help:"Max websocket message size (bytes)."`
 }
 
-func normalizeTokens(in []string) []string {
-	var out []string
-	for _, s := range in {
-		for _, p := range strings.Split(s, ",") {
-			if q := strings.TrimSpace(p); q != "" {
-				out = append(out, q)
-			}
-		}
+// Run executes the server command.
+func (s *ServerCmd) Run() error {
+	ec := server.Run(context.Background(), s.Listen, s.Tokens, s.MaxMsgSize)
+	select {
+	case err := <-ec:
+		return err
+	case <-context.Background().Done():
+		return nil
 	}
-	return out
 }
