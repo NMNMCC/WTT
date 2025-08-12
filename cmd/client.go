@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"wtt/client"
 	"wtt/common"
 )
@@ -15,7 +17,15 @@ type ClientCmd struct {
 	Protocol         string `name:"protocol" short:"p" default:"tcp" help:"Transport protocol: tcp or udp."`
 }
 
-func (c *ClientCmd) Run() error {
+func (c *ClientCmd) Run(ctx AppContext) error {
+	var logLevel slog.Level
+	if ctx.IsVerbose() {
+		logLevel = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	})))
+
 	if c.Protocol != "tcp" && c.Protocol != "udp" {
 		return fmt.Errorf("unsupported protocol: %s", c.Protocol)
 	}
