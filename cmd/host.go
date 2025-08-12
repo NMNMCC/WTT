@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"wtt/common"
 	"wtt/host"
 )
@@ -19,7 +21,15 @@ type HostCmd struct {
 	Token            string   `name:"token" short:"k" help:"Authentication token if required by server."`
 }
 
-func (h *HostCmd) Run() error {
+func (h *HostCmd) Run(ctx AppContext) error {
+	var logLevel slog.Level
+	if ctx.IsVerbose() {
+		logLevel = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	})))
+
 	if h.Protocol != "tcp" && h.Protocol != "udp" {
 		return fmt.Errorf("unsupported protocol: %s", h.Protocol)
 	}
