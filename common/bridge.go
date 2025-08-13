@@ -9,34 +9,42 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-func Bridge(protocol Protocol, localAddr string, dc *webrtc.DataChannel) error {
+func Bridge(protocol NetProtocol, localAddr string, dc *webrtc.DataChannel) <-chan error {
+	ec := make(chan error)
+
 	switch protocol {
 	case TCP:
 		conn, err := net.Dial("tcp", localAddr)
 		if err != nil {
-			return fmt.Errorf("failed to connect to TCP address %s: %w", localAddr, err)
+			ec <- fmt.Errorf("failed to connect to TCP address %s: %w", localAddr, err)
 		}
 		defer conn.Close()
-		return BridgeStream(dc, conn)
+
+		return Merge(ec, BridgeStream(dc, conn))
 	case UDP:
 		conn, err := net.ListenPacket("udp", localAddr)
 		if err != nil {
-			return fmt.Errorf("failed to listen on UDP address %s: %w", localAddr, err)
+			ec <- fmt.Errorf("failed to listen on UDP address %s: %w", localAddr, err)
 		}
 		defer conn.Close()
-		return BridgePacket(dc, conn)
-	}
 
-	return fmt.Errorf("unsupported protocol: %s", protocol)
+		return Merge(ec, BridgePacket(dc, conn))
+	default:
+		ec <- fmt.Errorf("unsupported protocol: %s", protocol)
+		return ec
+	}
 }
 
 // BridgeStream wires a WebRTC DataChannel with a stream-oriented net.Conn (like TCP) bidirectionally.
 // It installs the DataChannel handlers and blocks pumping local->remote until EOF/error.
-func BridgeStream(dc *webrtc.DataChannel, local net.Conn) error {
+func BridgeStream(dc *webrtc.DataChannel, local net.Conn) <-chan error {
+	ec := make(chan error)
+
 	slog.Info("Bridging DataChannel with local connection", "label", dc.Label(), "localAddr", local.RemoteAddr().String())
 
 	if dc == nil || local == nil {
-		return fmt.Errorf("nil data channel or local conn")
+		ec <- fmt.Errorf("nil data channel or local conn")
+		return ec
 	}
 	defer local.Close()
 	defer dc.Close()
@@ -55,35 +63,40 @@ func BridgeStream(dc *webrtc.DataChannel, local net.Conn) error {
 	dc.OnClose(func() { _ = local.Close() })
 
 	// Local -> Remote (blocking loop)
-	buf := make([]byte, 16384)
-	for {
-		n, err := local.Read(buf)
-		if err != nil {
-			if err == io.EOF || n == 0 {
-				return nil
+	go func() {
+		buf := make([]byte, 16384)
+		for {
+			n, err := local.Read(buf)
+			if err != nil {
+				if err == io.EOF || n == 0 {
+					ec <- err
+				}
+				if err.Error() == "use of closed network connection" {
+					ec <- err
+				}
+				ec <- fmt.Errorf("read local: %w", err)
 			}
-			if err.Error() == "use of closed network connection" {
-				return nil
+			if n == 0 {
+				ec <- fmt.Errorf("read local: EOF or zero bytes")
 			}
-			return fmt.Errorf("read local: %w", err)
+			if err := dc.Send(buf[:n]); err != nil {
+				ec <- fmt.Errorf("send to dc: %w", err)
+			}
 		}
-		if n == 0 {
-			return nil
-		}
-		if err := dc.Send(buf[:n]); err != nil {
-			return fmt.Errorf("send to dc: %w", err)
-		}
-	}
+	}()
+
+	return ec
 }
 
 // BridgePacket wires a WebRTC DataChannel with a packet-oriented net.PacketConn (like UDP) bidirectionally.
 // It starts a goroutine for local->remote and configures remote->local handler.
 // Caller owns pconn lifetime; handlers will close on errors.
-func BridgePacket(dc *webrtc.DataChannel, pconn net.PacketConn) error {
+func BridgePacket(dc *webrtc.DataChannel, pconn net.PacketConn) <-chan error {
+	ec := make(chan error)
+
 	slog.Info("Bridging DataChannel with packet connection", "label", dc.Label(), "localAddr", pconn.LocalAddr().String())
 
 	var returnAddr net.Addr
-	errc := make(chan error)
 
 	// Local -> Remote
 	go func() {
@@ -93,7 +106,7 @@ func BridgePacket(dc *webrtc.DataChannel, pconn net.PacketConn) error {
 			if err != nil {
 				_ = pconn.Close()
 				_ = dc.Close()
-				errc <- fmt.Errorf("read from packet conn: %w", err)
+				ec <- fmt.Errorf("read from packet conn: %w", err)
 				return
 			}
 			if returnAddr == nil {
@@ -103,7 +116,7 @@ func BridgePacket(dc *webrtc.DataChannel, pconn net.PacketConn) error {
 				if err := dc.Send(buf[:n]); err != nil {
 					_ = pconn.Close()
 					_ = dc.Close()
-					errc <- fmt.Errorf("send to dc: %w", err)
+					ec <- fmt.Errorf("send to dc: %w", err)
 					return
 				}
 			}
@@ -119,7 +132,7 @@ func BridgePacket(dc *webrtc.DataChannel, pconn net.PacketConn) error {
 			_ = pconn.Close()
 			_ = dc.Close()
 			select {
-			case errc <- fmt.Errorf("write to packet conn: %w", err):
+			case ec <- fmt.Errorf("write to packet conn: %w", err):
 			default:
 			}
 		}
@@ -129,5 +142,5 @@ func BridgePacket(dc *webrtc.DataChannel, pconn net.PacketConn) error {
 	dc.OnClose(func() { _ = pconn.Close() })
 
 	// Wait for error or return nil if DataChannel closes cleanly
-	return <-errc
+	return ec
 }

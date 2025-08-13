@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"log/slog"
 	"os"
 	"wtt/cmd"
 
@@ -26,9 +26,10 @@ func main() {
 		kong.Name("WTT"),
 		kong.Description("Simple WebRTC Tunnel"),
 		kong.UsageOnError(),
+		kong.BindTo(&cli, (*cmd.AppContext)(nil)),
 	)
 	if err := k.Run(&cli); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		slog.Error("error running command", "err", err)
 		os.Exit(1)
 	}
 }

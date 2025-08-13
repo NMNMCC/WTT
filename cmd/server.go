@@ -15,7 +15,7 @@ type ServerCmd struct {
 }
 
 // Run executes the server command.
-func (s *ServerCmd) Run(ctx AppContext) error {
+func (s *ServerCmd) Run(ctx AppContext) {
 	var logLevel slog.Level
 	if ctx.IsVerbose() {
 		logLevel = slog.LevelDebug
@@ -25,10 +25,5 @@ func (s *ServerCmd) Run(ctx AppContext) error {
 	})))
 
 	ec := server.Run(context.Background(), s.Listen, s.Tokens, s.MaxMsgSize)
-	select {
-	case err := <-ec:
-		return err
-	case <-context.Background().Done():
-		return nil
-	}
+	slog.Error("server error", "err", <-ec)
 }

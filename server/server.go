@@ -8,67 +8,133 @@ import (
 	"wtt/common"
 
 	"github.com/cornelk/hashmap"
-	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
+	"github.com/go-chi/chi/v5"
+	"github.com/pion/webrtc/v4"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+type MessageChannel struct {
+	offer  chan webrtc.SessionDescription
+	answer chan webrtc.SessionDescription
 }
 
-func Run(ctx context.Context, listenAddr string, tokens []string, maxMsgSize int64) <-chan error {
-	connM := hashmap.New[string, *common.RWLock[*websocket.Conn]]()
+var hostM = hashmap.New[string, MessageChannel]()
 
+func Run(ctx context.Context, listenAddr string, tokens []string, maxMsgSize int64) <-chan error {
 	ec := make(chan error)
 
-	srv := http.NewServeMux()
+	router := chi.NewRouter()
 
-	srv.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			slog.Error("upgrade error", "err", err)
-			ec <- err
-			return
-		}
-		defer conn.Close()
-		slog.Info("new connection", "remote", conn.RemoteAddr())
-		conn.SetReadLimit(maxMsgSize)
-		id, err := uuid.NewRandom()
-		if err != nil {
-			slog.Error("generate uuid error", "err", err)
-			ec <- err
-			return
-		}
-		connM.Set(id.String(), common.NewRWLock(conn))
-		slog.Info("new client", "id", id)
-
-		var anyM common.WebSocketForwardMessageContainer[json.RawMessage]
-		if err := conn.ReadJSON(&anyM); err != nil {
-			slog.Error("read json error", "err", err)
-			ec <- err
-			return
-		}
-		slog.Debug("forward message", "receiver", anyM.ReceiverID, "bytes", len(anyM.Content))
-
-		if conn, ok := connM.Get(anyM.ReceiverID); ok {
-			go conn.Write(func(c *websocket.Conn) {
-				if err := c.WriteJSON(anyM.Content); err != nil {
-					slog.Error("write json error", "err", err)
-					ec <- err
-				}
-			})
-		} else {
-			slog.Warn("receiver not found", "id", anyM.ReceiverID)
-		}
-	})
-
-	slog.Info("server listening", "addr", listenAddr)
-	err := http.ListenAndServe(listenAddr, srv)
-	if err != nil {
-		slog.Error("listen and serve error", "err", err)
-		ec <- err
-	}
+	router.Post(string(common.RTCRegisterType), register)
+	router.Post(string(common.RTCOfferType), receiveOffer)
+	router.Get(string(common.RTCOfferType)+"/{hostID}", sendOffer)
+	router.Post(string(common.RTCAnswerType), receiveAnswer)
+	router.Get(string(common.RTCAnswerType)+"/{hostID}", sendAnswer)
+	router.Post(string(common.RTCCandidateType), CandidateRouter)
 
 	return ec
+}
+
+func register(w http.ResponseWriter, r *http.Request) {
+	var msg common.RTCRegister
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		slog.Error("decode register message error", "err", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	slog.Info("received register message", "id", msg.HostID)
+
+	hostM.Set(msg.HostID, MessageChannel{
+		offer:  make(chan webrtc.SessionDescription),
+		answer: make(chan webrtc.SessionDescription),
+	})
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func receiveOffer(w http.ResponseWriter, r *http.Request) {
+	var offer common.RTCOffer
+	if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
+		slog.Error("decode offer message error", "err", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	slog.Info("received offer message", "id", offer.HostID)
+
+	c, ok := hostM.Get(offer.HostID)
+	if !ok {
+		slog.Error("host not found", "id", offer.HostID)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	c.offer <- offer.SessionDescription
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func sendOffer(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "hostID")
+
+	c, ok := hostM.Get(hostID)
+	if !ok {
+		slog.Error("host not found", "id", hostID)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	offer := <-c.offer
+
+	offerJ, err := json.Marshal(offer)
+	if err != nil {
+		slog.Error("encode offer message error", "err", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(offerJ)
+}
+
+func receiveAnswer(w http.ResponseWriter, r *http.Request) {
+	var answer common.RTCAnswer
+	if err := json.NewDecoder(r.Body).Decode(&answer); err != nil {
+		slog.Error("decode answer message error", "err", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	slog.Info("received answer message")
+
+	c, ok := hostM.Get(answer.HostID)
+	if !ok {
+		slog.Error("host not found", "id", answer.HostID)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	c.answer <- answer.SessionDescription
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func sendAnswer(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "hostID")
+
+	c, ok := hostM.Get(hostID)
+	if !ok {
+		slog.Error("host not found", "id", hostID)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	answer := <-c.answer
+
+	answerJ, err := json.Marshal(answer)
+	if err != nil {
+		slog.Error("encode answer message error", "err", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(answerJ)
+}
+
+func CandidateRouter(w http.ResponseWriter, r *http.Request) {
+
 }

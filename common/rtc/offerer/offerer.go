@@ -19,3 +19,5 @@ func C_CreateOffer(pc *webrtc.PeerConnection, cfg webrtc.OfferOptions) (*webrtc.
 }
 
 var D_SetOfferAsLocalDescription = wr.SetLocalDescription
+
+var E_SetAnswerAsRemoteDescription = wr.SetRemoteDescription

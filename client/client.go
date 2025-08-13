@@ -2,86 +2,86 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"wtt/common"
 	"wtt/common/rtc"
 	"wtt/common/rtc/offerer"
 
+	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
 )
 
-// Run 启动客户端流程。
-// serverAddr: 信令服务器地址（ws/wss）。
-// hostID: 目标主机 ID。
-// localAddr: 本地转发地址。
-// protocol: 传输协议（tcp/udp）。
-func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol common.Protocol) error {
+func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol common.NetProtocol) <-chan error {
 	slog.Info("client running")
+
+	ec := make(chan error)
+
 	pcCfg := webrtc.Configuration{}
-	slog.Debug("creating peer connection")
 	pc, err := offerer.A_CreatePeerConnection(pcCfg)
 	if err != nil {
-		slog.Error("create peer connection error", "err", err)
-		return err
+		ec <- err
 	}
 	defer pc.Close()
 
 	id, err := uuid.NewRandom()
 	if err != nil {
-		slog.Error("generate uuid error", "err", err)
-		return err
+		ec <- err
 	}
-	slog.Debug("creating data channel")
 	dc, err := offerer.B_CreateDataChannel(pc, id.String())
 	if err != nil {
-		slog.Error("create data channel error", "err", err)
-		return err
+		ec <- err
 	}
 	defer dc.Close()
 
+	dcOpen := make(chan struct{}, 1)
+	dc.OnOpen(func() { dcOpen <- struct{}{} })
+
 	ofCfg := webrtc.OfferOptions{}
-	slog.Debug("creating offer")
 	of, err := offerer.C_CreateOffer(pc, ofCfg)
 	if err != nil {
-		slog.Error("create offer error", "err", err)
-		return err
+		ec <- err
 	}
-	ofM, err := json.Marshal(
-		common.WebSocketForwardMessageContainer[common.RTCMessage[common.RTCOfferPayload]]{
-			Type:       common.MessageTypeForward,
-			ReceiverID: hostID,
-			Content: common.RTCMessage[common.RTCOfferPayload]{
-				Type: common.RTCOffer,
-				Payload: common.RTCOfferPayload{
-					SDP: *of,
-				},
-			},
-		})
-	if err != nil {
-		slog.Error("marshal offer error", "err", err)
-		return err
+
+	slog.Info("setting local description")
+	if err := offerer.D_SetOfferAsLocalDescription(pc, *of); err != nil {
+		ec <- err
 	}
-	slog.Info("connecting to websocket server", "addr", serverAddr)
-	wsc, err := common.ConnectToWebSocketServer(ctx, serverAddr)
-	if err != nil {
-		slog.Error("connect to websocket server error", "err", err)
-		return err
+
+	<-webrtc.GatheringCompletePromise(pc)
+	ld := pc.LocalDescription()
+	if ld == nil {
+		ec <- webrtc.ErrConnectionClosed
+		return ec
 	}
-	defer wsc.Close()
+
+	offerM := common.RTCOffer{
+		HostID:             hostID,
+		SessionDescription: *ld,
+	}
+	hc := resty.New()
+
 	slog.Info("sending offer")
-	rtc.SendSignal(wsc, ofM)
+	rtc.SendSignal(hc, common.RTCOfferType, offerM)
 
 	slog.Info("waiting for answer")
-	var ansM common.RTCMessage[common.RTCAnswerPayload]
-	if err := wsc.ReadJSON(&ansM); err != nil {
-		slog.Error("read answer error", "err", err)
-		return err
+	answer, err := rtc.ReceiveSignal(hc, common.RTCAnswerType)
+	if err != nil {
+		ec <- err
 	}
 	slog.Info("setting remote description")
-	offerer.D_SetOfferAsLocalDescription(pc, ansM.Payload.SDP)
+	if err := offerer.E_SetAnswerAsRemoteDescription(pc, answer); err != nil {
+		ec <- err
+	}
+
+	slog.Info("waiting for data channel to open")
+	select {
+	case <-dcOpen:
+		// ok
+	case <-ctx.Done():
+		ec <- ctx.Err()
+	}
 
 	slog.Info("start bridging", "protocol", protocol, "local", localAddr)
-	return common.Bridge(protocol, localAddr, dc)
+	return common.Merge(ec, common.Bridge(protocol, localAddr, dc))
 }
