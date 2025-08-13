@@ -131,7 +131,7 @@ func TestE2ETCP(t *testing.T) {
 	cancel()
 
 	// Check for errors from the components, allowing time for graceful shutdown.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		select {
 		case err := <-serverErrCh:
 			require.NoError(t, err, "server exited with error")

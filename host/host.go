@@ -105,8 +105,8 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 						conn, err := net.Dial("tcp", localAddr)
 						if err != nil {
 							slog.Error("host failed to dial local service", "err", err)
-							pc.Close()   // Close the current peer connection
-							continue // And try to get a new one
+							pc.Close() // Close the current peer connection
+							continue   // And try to get a new one
 						}
 						bridgeErrCh = common.BridgeStream(dc, conn)
 					case common.UDP:
