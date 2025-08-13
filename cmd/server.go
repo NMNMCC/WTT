@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"log/slog"
 	"wtt/server"
 )
 
@@ -14,5 +15,8 @@ type ServerCmd struct {
 
 // Run executes the server command.
 func (s *ServerCmd) Run() error {
-	return <-server.Run(context.Background(), s.Listen, s.Tokens, s.MaxMsgSize)
+	ec := server.Run(context.Background(), s.Listen, s.Tokens, s.MaxMsgSize)
+	slog.Info("server started")
+
+	return <-ec
 }

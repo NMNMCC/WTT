@@ -1,14 +1,14 @@
 package answerer
 
 import (
-	wr "wtt/common/rtc"
+	"wtt/common/rtc"
 
 	"github.com/pion/webrtc/v4"
 )
 
-var A_CreatePeerConnection = wr.CreatePeerConnection
+var A_CreatePeerConnection = rtc.CreatePeerConnection
 
-var B_SetOfferAsRemoteDescription = wr.SetRemoteDescription
+var B_SetOfferAsRemoteDescription = rtc.SetRemoteDescription
 
 func C_CreateAnswer(pc *webrtc.PeerConnection, cfg webrtc.AnswerOptions) (*webrtc.SessionDescription, error) {
 	answer, err := pc.CreateAnswer(&cfg)
@@ -18,4 +18,4 @@ func C_CreateAnswer(pc *webrtc.PeerConnection, cfg webrtc.AnswerOptions) (*webrt
 	return &answer, nil
 }
 
-var D_SetAnswerAsLocalDescription = wr.SetLocalDescription
+var D_SetAnswerAsLocalDescription = rtc.SetLocalDescription

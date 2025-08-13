@@ -29,12 +29,5 @@ func (c *ClientCmd) Run() error {
 	ec := client.Run(context.Background(), c.SignalingAddress, c.HostID, c.LocalAddress, common.NetProtocol(c.Protocol))
 	slog.Info("client started")
 
-	for err := range ec {
-		if err != nil {
-			slog.Error("client error", "error", err)
-			return err
-		}
-	}
-
-	return nil
+	return <-ec
 }

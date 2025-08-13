@@ -21,5 +21,8 @@ func (h *HostCmd) Run() error {
 		return nil
 	}
 
-	return <-host.Run(context.Background(), h.ID, h.SignalingAddress, h.LocalAddress, common.NetProtocol(h.Protocol))
+	ec := host.Run(context.Background(), h.ID, h.SignalingAddress, h.LocalAddress, common.NetProtocol(h.Protocol))
+	slog.Info("host started")
+
+	return <-ec
 }

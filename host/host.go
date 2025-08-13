@@ -45,14 +45,15 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 			slog.Info("waiting for offer")
 			offer, err := rtc.ReceiveRTCEvent(hc, common.RTCOfferType, id)
 			if err != nil {
-				slog.Error("receive offer error", "err", err)
+				slog.Error("receive offer error", "err", err, "raw", offer)
 				ec <- err
 				return
 			}
+			slog.Info("received offer", "id", id, "offer", offer)
 
 			slog.Info("setting remote description")
-			if err := answerer.B_SetOfferAsRemoteDescription(pc, offer); err != nil {
-				slog.Error("set remote description error", "err", err)
+			if err := answerer.B_SetOfferAsRemoteDescription(pc, *offer); err != nil {
+				slog.Error("set remote description error", "err", err, "raw", offer)
 				ec <- err
 				return
 			}
@@ -80,12 +81,8 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 				return
 			}
 
-			answerM := common.RTCAnswer{
-				HostID:             id,
-				SessionDescription: *ld,
-			}
 			slog.Info("sending answer")
-			if err := rtc.SendRTCEvent(hc, common.RTCAnswerType, id, answerM); err != nil {
+			if err := rtc.SendRTCEvent(hc, common.RTCAnswerType, id, *ld); err != nil {
 				slog.Error("send answer error", "err", err)
 				ec <- err
 				return

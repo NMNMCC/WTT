@@ -59,14 +59,10 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 			return
 		}
 
-		offerM := common.RTCOffer{
-			HostID:             hostID,
-			SessionDescription: *ld,
-		}
 		hc := resty.New().SetBaseURL(serverAddr)
 
-		slog.Info("sending offer")
-		if err := rtc.SendRTCEvent(hc, common.RTCOfferType, hostID, offerM); err != nil {
+		slog.Info("sending offer", "offer", ld)
+		if err := rtc.SendRTCEvent(hc, common.RTCOfferType, hostID, *ld); err != nil {
 			ec <- err
 			return
 		}
@@ -78,7 +74,7 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 			return
 		}
 		slog.Info("setting remote description")
-		if err := offerer.E_SetAnswerAsRemoteDescription(pc, answer); err != nil {
+		if err := offerer.E_SetAnswerAsRemoteDescription(pc, *answer); err != nil {
 			ec <- err
 			return
 		}

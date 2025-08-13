@@ -20,17 +20,17 @@ type MessageChannel struct {
 var hostM = hashmap.New[string, MessageChannel]()
 
 func Run(ctx context.Context, listenAddr string, tokens []string, maxMsgSize int64) <-chan error {
-	slog.Info("server starting", "listen", listenAddr)
 
 	ec := make(chan error, 1)
 
 	router := chi.NewRouter()
 	router.Use(LimitRequestBodySize(maxMsgSize))
+	router.Use(Logger)
 
-	router.Post("/"+string(common.RTCRegisterType), register)
-	router.Post("/"+string(common.RTCOfferType), receiveOffer)
+	router.Head("/"+string(common.RTCRegisterType)+"/{hostID}", register)
+	router.Post("/"+string(common.RTCOfferType)+"/{hostID}", receiveOffer)
 	router.Get("/"+string(common.RTCOfferType)+"/{hostID}", sendOffer)
-	router.Post("/"+string(common.RTCAnswerType), receiveAnswer)
+	router.Post("/"+string(common.RTCAnswerType)+"/{hostID}", receiveAnswer)
 	router.Get("/"+string(common.RTCAnswerType)+"/{hostID}", sendAnswer)
 
 	srv := &http.Server{Addr: listenAddr, Handler: router}
@@ -42,7 +42,8 @@ func Run(ctx context.Context, listenAddr string, tokens []string, maxMsgSize int
 	}()
 
 	go func() {
-		slog.Info("server listening", "addr", listenAddr)
+		slog.Info("server listening", "listen", listenAddr)
+
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			ec <- err
 			return
@@ -55,15 +56,11 @@ func Run(ctx context.Context, listenAddr string, tokens []string, maxMsgSize int
 }
 
 func register(w http.ResponseWriter, r *http.Request) {
-	var msg common.RTCRegister
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		slog.Error("decode register message error", "err", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	slog.Info("received register message", "id", msg.HostID)
+	hostID := chi.URLParam(r, "hostID")
 
-	hostM.Set(msg.HostID, MessageChannel{
+	slog.Info("received register message", "id", hostID)
+
+	hostM.Set(hostID, MessageChannel{
 		offer:  make(chan webrtc.SessionDescription),
 		answer: make(chan webrtc.SessionDescription),
 	})
@@ -72,21 +69,23 @@ func register(w http.ResponseWriter, r *http.Request) {
 }
 
 func receiveOffer(w http.ResponseWriter, r *http.Request) {
-	var offer common.RTCOffer
+	hostID := chi.URLParam(r, "hostID")
+
+	var offer webrtc.SessionDescription
 	if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
 		slog.Error("decode offer message error", "err", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	slog.Info("received offer message", "id", offer.HostID)
+	slog.Info("received offer message", "id", hostID)
 
-	c, ok := hostM.Get(offer.HostID)
+	c, ok := hostM.Get(hostID)
 	if !ok {
-		slog.Error("host not found", "id", offer.HostID)
+		slog.Error("host not found", "id", hostID)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	c.offer <- offer.SessionDescription
+	c.offer <- offer
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -110,11 +109,14 @@ func sendOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slog.Info("sending offer", "id", hostID)
 	w.Write(offerJ)
 }
 
 func receiveAnswer(w http.ResponseWriter, r *http.Request) {
-	var answer common.RTCAnswer
+	hostID := chi.URLParam(r, "hostID")
+
+	var answer webrtc.SessionDescription
 	if err := json.NewDecoder(r.Body).Decode(&answer); err != nil {
 		slog.Error("decode answer message error", "err", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -122,13 +124,13 @@ func receiveAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("received answer message")
 
-	c, ok := hostM.Get(answer.HostID)
+	c, ok := hostM.Get(hostID)
 	if !ok {
-		slog.Error("host not found", "id", answer.HostID)
+		slog.Error("host not found", "id", hostID)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	c.answer <- answer.SessionDescription
+	c.answer <- answer
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -152,5 +154,6 @@ func sendAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slog.Info("sending answer", "id", hostID)
 	w.Write(answerJ)
 }
