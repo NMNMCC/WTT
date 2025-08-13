@@ -44,13 +44,13 @@ func RegisterHost(c *resty.Client, hostID string) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("registered host", "id", hostID, "status", res.Status())
+	slog.Debug("registered host", "id", hostID, "status", res.Status())
 
 	return nil
 }
 
 func SendRTCEvent[T common.RTCEventType](c *resty.Client, typ T, hostID string, signal webrtc.SessionDescription) error {
-	slog.Info("sending signal", "server", c.BaseURL, "type", typ, "hostID", hostID)
+	slog.Debug("sending signal", "server", c.BaseURL, "type", typ, "hostID", hostID)
 
 	res, err := c.R().SetBody(signal).Post("/" + string(typ) + "/" + hostID)
 	if err != nil {
@@ -59,13 +59,13 @@ func SendRTCEvent[T common.RTCEventType](c *resty.Client, typ T, hostID string, 
 	if res.StatusCode() != http.StatusOK {
 		return fmt.Errorf("unexpected status code: %d", res.StatusCode())
 	}
-	slog.Info("signal sent", "type", typ, "status", res.Status())
+	slog.Debug("signal sent", "type", typ, "status", res.Status())
 
 	return nil
 }
 
 func ReceiveRTCEvent[T common.RTCEventType](c *resty.Client, typ T, hostID string) (*webrtc.SessionDescription, error) {
-	slog.Info("receiving signal", "server", c.BaseURL, "type", typ, "hostID", hostID)
+	slog.Debug("receiving signal", "server", c.BaseURL, "type", typ, "hostID", hostID)
 
 	res, err := c.R().Get("/" + string(typ) + "/" + hostID)
 	if err != nil {
@@ -74,7 +74,7 @@ func ReceiveRTCEvent[T common.RTCEventType](c *resty.Client, typ T, hostID strin
 	if res.StatusCode() != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", res.StatusCode())
 	}
-	slog.Info("signal received", "type", typ)
+	slog.Debug("signal received", "type", typ)
 
 	var signal webrtc.SessionDescription
 	if err := json.Unmarshal(res.Body(), &signal); err != nil {

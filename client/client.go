@@ -48,7 +48,7 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 			return
 		}
 
-		slog.Info("setting local description")
+		slog.Debug("setting local description")
 		if err := offerer.D_SetOfferAsLocalDescription(pc, *of); err != nil {
 			ec <- err
 			return
@@ -63,25 +63,25 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 
 		hc := resty.New().SetBaseURL(serverAddr)
 
-		slog.Info("sending offer", "offer", ld)
+		slog.Debug("sending offer")
 		if err := rtc.SendRTCEvent(hc, common.RTCOfferType, hostID, *ld); err != nil {
 			ec <- err
 			return
 		}
 
-		slog.Info("waiting for answer")
+		slog.Debug("waiting for answer")
 		answer, err := rtc.ReceiveRTCEvent(hc, common.RTCAnswerType, hostID)
 		if err != nil {
 			ec <- err
 			return
 		}
-		slog.Info("setting remote description")
+		slog.Debug("setting remote description")
 		if err := offerer.E_SetAnswerAsRemoteDescription(pc, *answer); err != nil {
 			ec <- err
 			return
 		}
 
-		slog.Info("waiting for data channel to open")
+		slog.Debug("waiting for data channel to open")
 		select {
 		case <-dcOpen:
 			slog.Info("start bridging", "protocol", protocol, "local", localAddr)
@@ -112,7 +112,7 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 					slog.Error("bridge finished with error", "err", err)
 					ec <- err
 				} else {
-					slog.Info("bridge finished cleanly")
+					slog.Debug("bridge finished cleanly")
 					ec <- nil
 				}
 

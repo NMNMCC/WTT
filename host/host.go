@@ -31,7 +31,7 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 
 			dcC := make(chan *webrtc.DataChannel, 1)
 			pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-				slog.Info("data channel created", "label", dc.Label())
+				slog.Debug("data channel created", "label", dc.Label())
 				dcC <- dc
 			})
 
@@ -42,18 +42,18 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 				return
 			}
 
-			slog.Info("waiting for offer")
+			slog.Debug("waiting for offer")
 			offer, err := rtc.ReceiveRTCEvent(hc, common.RTCOfferType, id)
 			if err != nil {
-				slog.Error("receive offer error", "err", err, "raw", offer)
+				slog.Error("receive offer error", "err", err)
 				ec <- err
 				return
 			}
-			slog.Info("received offer", "id", id, "offer", offer)
+			slog.Debug("received offer", "id", id)
 
-			slog.Info("setting remote description")
+			slog.Debug("setting remote description")
 			if err := answerer.B_SetOfferAsRemoteDescription(pc, *offer); err != nil {
-				slog.Error("set remote description error", "err", err, "raw", offer)
+				slog.Error("set remote description error", "err", err)
 				ec <- err
 				return
 			}
@@ -66,7 +66,7 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 				ec <- err
 				return
 			}
-			slog.Info("setting local description")
+			slog.Debug("setting local description")
 			if err := answerer.D_SetAnswerAsLocalDescription(pc, *answer); err != nil {
 				slog.Error("set local description error", "err", err)
 				ec <- err
@@ -81,20 +81,20 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 				return
 			}
 
-			slog.Info("sending answer")
+			slog.Debug("sending answer")
 			if err := rtc.SendRTCEvent(hc, common.RTCAnswerType, id, *ld); err != nil {
 				slog.Error("send answer error", "err", err)
 				ec <- err
 				return
 			}
 
-			slog.Info("waiting for data channel")
+			slog.Debug("waiting for data channel")
 			select {
 			case dc := <-dcC:
 				opened := make(chan struct{})
 				dc.OnOpen(func() { opened <- struct{}{} })
 
-				slog.Info("waiting for data channel to open")
+				slog.Debug("waiting for data channel to open")
 				select {
 				case <-opened:
 					slog.Info("start bridging", "protocol", protocol, "local", localAddr)
@@ -123,7 +123,7 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 					if err := <-bridgeErrCh; err != nil {
 						slog.Error("bridge finished with error", "err", err)
 					} else {
-						slog.Info("bridge finished cleanly")
+						slog.Debug("bridge finished cleanly")
 					}
 
 				case <-ctx.Done():

@@ -58,7 +58,7 @@ func Run(ctx context.Context, listenAddr string, tokens []string, maxMsgSize int
 func register(w http.ResponseWriter, r *http.Request) {
 	hostID := chi.URLParam(r, "hostID")
 
-	slog.Info("received register message", "id", hostID)
+	slog.Debug("received register message", "id", hostID)
 
 	hostM.Set(hostID, MessageChannel{
 		offer:  make(chan webrtc.SessionDescription),
@@ -77,7 +77,7 @@ func receiveOffer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	slog.Info("received offer message", "id", hostID)
+	slog.Debug("received offer message", "id", hostID)
 
 	c, ok := hostM.Get(hostID)
 	if !ok {
@@ -109,7 +109,7 @@ func sendOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("sending offer", "id", hostID)
+	slog.Debug("sending offer", "id", hostID)
 	w.Write(offerJ)
 }
 
@@ -122,7 +122,7 @@ func receiveAnswer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	slog.Info("received answer message")
+	slog.Debug("received answer message", "id", hostID)
 
 	c, ok := hostM.Get(hostID)
 	if !ok {
@@ -154,6 +154,6 @@ func sendAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("sending answer", "id", hostID)
+	slog.Debug("sending answer", "id", hostID)
 	w.Write(answerJ)
 }

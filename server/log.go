@@ -15,12 +15,6 @@ func Logger(next http.Handler) http.Handler {
 
 		status := ww.Status()
 
-		bodyR := r.Body
-		var body []byte
-		if bodyR != nil {
-			bodyR.Read(body)
-		}
-
-		slog.Info("request", "uri", r.RequestURI, "method", r.Method, "status", status, "from", r.RemoteAddr, "body", body)
+		slog.Debug("request", "uri", r.RequestURI, "method", r.Method, "status", status, "from", r.RemoteAddr)
 	})
 }
