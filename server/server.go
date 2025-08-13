@@ -20,16 +20,36 @@ type MessageChannel struct {
 var hostM = hashmap.New[string, MessageChannel]()
 
 func Run(ctx context.Context, listenAddr string, tokens []string, maxMsgSize int64) <-chan error {
-	ec := make(chan error)
+	slog.Info("server starting", "listen", listenAddr)
+
+	ec := make(chan error, 1)
 
 	router := chi.NewRouter()
+	router.Use(LimitRequestBodySize(maxMsgSize))
 
-	router.Post(string(common.RTCRegisterType), register)
-	router.Post(string(common.RTCOfferType), receiveOffer)
-	router.Get(string(common.RTCOfferType)+"/{hostID}", sendOffer)
-	router.Post(string(common.RTCAnswerType), receiveAnswer)
-	router.Get(string(common.RTCAnswerType)+"/{hostID}", sendAnswer)
-	router.Post(string(common.RTCCandidateType), CandidateRouter)
+	router.Post("/"+string(common.RTCRegisterType), register)
+	router.Post("/"+string(common.RTCOfferType), receiveOffer)
+	router.Get("/"+string(common.RTCOfferType)+"/{hostID}", sendOffer)
+	router.Post("/"+string(common.RTCAnswerType), receiveAnswer)
+	router.Get("/"+string(common.RTCAnswerType)+"/{hostID}", sendAnswer)
+
+	srv := &http.Server{Addr: listenAddr, Handler: router}
+
+	go func() {
+		<-ctx.Done()
+		slog.Info("server context cancelled, shutting down")
+		_ = srv.Shutdown(context.Background())
+	}()
+
+	go func() {
+		slog.Info("server listening", "addr", listenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			ec <- err
+			return
+		}
+		slog.Info("server exited")
+		ec <- nil
+	}()
 
 	return ec
 }
@@ -133,8 +153,4 @@ func sendAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Write(answerJ)
-}
-
-func CandidateRouter(w http.ResponseWriter, r *http.Request) {
-
 }

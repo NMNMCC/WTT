@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"context"
-	"log/slog"
-	"os"
 	"wtt/server"
 )
 
@@ -15,15 +13,6 @@ type ServerCmd struct {
 }
 
 // Run executes the server command.
-func (s *ServerCmd) Run(ctx AppContext) {
-	var logLevel slog.Level
-	if ctx.IsVerbose() {
-		logLevel = slog.LevelDebug
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: logLevel,
-	})))
-
-	ec := server.Run(context.Background(), s.Listen, s.Tokens, s.MaxMsgSize)
-	slog.Error("server error", "err", <-ec)
+func (s *ServerCmd) Run() error {
+	return <-server.Run(context.Background(), s.Listen, s.Tokens, s.MaxMsgSize)
 }

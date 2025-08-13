@@ -32,16 +32,11 @@ type RTCAnswer struct {
 	SessionDescription webrtc.SessionDescription `json:"sdp"`
 }
 
-type RTCCandidate struct {
-	HostID       string                  `json:"host_id"`
-	ICECandidate webrtc.ICECandidateInit `json:"candidate"`
-}
-
 type IDMessage[P any] struct {
 	MessageID string `json:"message_id"`
 	Payload   P      `json:"payload"`
 }
 
 type RTCEventPayload interface {
-	RTCRegister | RTCOffer | RTCAnswer | RTCCandidate | struct{}
+	RTCRegister | RTCOffer | RTCAnswer | struct{}
 }

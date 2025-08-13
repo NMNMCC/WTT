@@ -2,6 +2,7 @@ package rtc
 
 import (
 	"log/slog"
+	"net/http"
 	"wtt/common"
 
 	"github.com/go-resty/resty/v2"
@@ -53,9 +54,11 @@ func RegisterHost(c *resty.Client, hostID string) error {
 	return nil
 }
 
-func SendSignal[T common.RTCEventType, S common.RTCEventPayload](c *resty.Client, typ T, signal S) error {
-	res, err := c.R().SetBody(signal).Post(string(typ))
-	if err != nil {
+func SendRTCEvent[T common.RTCEventType, S common.RTCEventPayload](c *resty.Client, typ T, hostID string, signal S) error {
+	slog.Info("sending signal", "server", c.BaseURL, "type", typ, "hostID", hostID)
+
+	res, err := c.R().SetBody(signal).Post("/" + string(typ) + "/" + hostID)
+	if err != nil || res.StatusCode() != http.StatusOK {
 		return err
 	}
 	slog.Info("signal sent", "type", typ, "status", res.Status())
@@ -63,10 +66,12 @@ func SendSignal[T common.RTCEventType, S common.RTCEventPayload](c *resty.Client
 	return nil
 }
 
-func ReceiveSignal[T common.RTCEventType](c *resty.Client, typ T) (webrtc.SessionDescription, error) {
+func ReceiveRTCEvent[T common.RTCEventType](c *resty.Client, typ T, hostID string) (webrtc.SessionDescription, error) {
+	slog.Info("receiving signal", "server", c.BaseURL, "type", typ, "hostID", hostID)
+
 	var signal webrtc.SessionDescription
-	_, err := c.R().SetResult(&signal).Get(string(typ))
-	if err != nil {
+	res, err := c.R().SetResult(&signal).Get("/" + string(typ) + "/" + hostID)
+	if err != nil || res.StatusCode() != http.StatusOK {
 		return signal, err
 	}
 	slog.Info("signal received", "type", typ)

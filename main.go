@@ -16,18 +16,27 @@ type CLI struct {
 	Version bool          `name:"version" help:"Show version."`
 }
 
-func (c *CLI) IsVerbose() bool {
-	return c.Verbose
-}
-
 func main() {
 	var cli CLI
 	k := kong.Parse(&cli,
-		kong.Name("WTT"),
+		kong.Name("wtt"),
 		kong.Description("Simple WebRTC Tunnel"),
 		kong.UsageOnError(),
-		kong.BindTo(&cli, (*cmd.AppContext)(nil)),
 	)
+
+	if cli.Version {
+		// minimal version printing; could be replaced by ldflags later
+		slog.Info("wtt version", "version", "dev")
+		return
+	}
+
+	// set log level based on verbose flag
+	lvl := slog.LevelInfo
+	if cli.Verbose {
+		lvl = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
+
 	if err := k.Run(&cli); err != nil {
 		slog.Error("error running command", "err", err)
 		os.Exit(1)
