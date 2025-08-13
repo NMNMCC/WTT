@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"log/slog"
+	"net"
 
 	"wtt/common"
 	"wtt/common/rtc"
@@ -27,7 +28,6 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 				ec <- err
 				return
 			}
-			defer pc.Close()
 
 			dcC := make(chan *webrtc.DataChannel, 1)
 			pc.OnDataChannel(func(dc *webrtc.DataChannel) {
@@ -97,10 +97,35 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 				slog.Info("waiting for data channel to open")
 				select {
 				case <-opened:
-					defer dc.Close()
 					slog.Info("start bridging", "protocol", protocol, "local", localAddr)
 
-					go common.Output(ec, common.Bridge(protocol, localAddr, dc))
+					var bridgeErrCh <-chan error
+					switch protocol {
+					case common.TCP:
+						conn, err := net.Dial("tcp", localAddr)
+						if err != nil {
+							slog.Error("host failed to dial local service", "err", err)
+							pc.Close()   // Close the current peer connection
+							continue // And try to get a new one
+						}
+						bridgeErrCh = common.BridgeStream(dc, conn)
+					case common.UDP:
+						conn, err := net.ListenPacket("udp", localAddr)
+						if err != nil {
+							slog.Error("host failed to listen on local udp", "err", err)
+							pc.Close()
+							continue
+						}
+						bridgeErrCh = common.BridgePacket(dc, conn)
+					}
+
+					// Wait for the bridge to finish
+					if err := <-bridgeErrCh; err != nil {
+						slog.Error("bridge finished with error", "err", err)
+					} else {
+						slog.Info("bridge finished cleanly")
+					}
+
 				case <-ctx.Done():
 					ec <- ctx.Err()
 				}
@@ -108,6 +133,10 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 				ec <- ctx.Err()
 			}
 
+			// The connection is done, close the peer connection before looping again.
+			if err := pc.Close(); err != nil {
+				slog.Error("failed to close peer connection", "err", err)
+			}
 		}
 	}()
 

@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"wtt/common"
 	"wtt/common/rtc"
 	"wtt/common/rtc/offerer"
@@ -83,7 +85,54 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 		select {
 		case <-dcOpen:
 			slog.Info("start bridging", "protocol", protocol, "local", localAddr)
-			common.Output(ec, common.Bridge(protocol, localAddr, dc))
+
+			switch protocol {
+			case common.TCP:
+				l, err := net.Listen("tcp", localAddr)
+				if err != nil {
+					ec <- fmt.Errorf("client failed to listen on local port: %w", err)
+					return
+				}
+				defer l.Close()
+
+				slog.Info("client listening for local connections", "addr", l.Addr())
+
+				// Accept one connection
+				conn, err := l.Accept()
+				if err != nil {
+					// if context is cancelled, this is expected
+					if ctx.Err() == nil {
+						ec <- fmt.Errorf("client failed to accept connection: %w", err)
+					}
+					return
+				}
+
+				bridgeErrCh := common.BridgeStream(dc, conn)
+				if err := <-bridgeErrCh; err != nil {
+					slog.Error("bridge finished with error", "err", err)
+					ec <- err
+				} else {
+					slog.Info("bridge finished cleanly")
+					ec <- nil
+				}
+
+			case common.UDP:
+				// UDP logic for the client is more complex as it doesn't have a clear "accept" model.
+				// For now, we'll assume the same ListenPacket logic as the host is sufficient,
+				// though a real-world scenario might need more sophisticated handling.
+				conn, err := net.ListenPacket("udp", localAddr)
+				if err != nil {
+					ec <- fmt.Errorf("client failed to listen on local udp: %w", err)
+					return
+				}
+				bridgeErrCh := common.BridgePacket(dc, conn)
+				if err := <-bridgeErrCh; err != nil {
+					slog.Error("udp bridge finished with error", "err", err)
+					ec <- err
+				} else {
+					ec <- nil
+				}
+			}
 			return
 		case <-ctx.Done():
 			ec <- ctx.Err()
