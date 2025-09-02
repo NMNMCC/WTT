@@ -1,0 +1,31 @@
+# 认证信息
+auth:
+  # 用户身份令牌，用于向信令服务器获取会话凭证
+  token: "your-secret-user-token"
+
+# 信令服务器地址
+signaling_server: "ws://localhost:8080/ws"
+
+# STUN/TURN 服务器配置
+ice_servers:
+  - urls: "stun:stun.l.google.com:19302"
+  - urls: "turn:turn.example.com:3478"
+    username: "turn-user"
+    credential: "turn-password"
+
+#  Provider 配置段
+# 定义此客户端作为服务网关发布的后端服务
+provide:
+  - service_name: "prod-mysql" # 对外发布的服务名，在用户内必须唯一
+    target_address: "tcp://192.168.1.50:3306" # 服务的真实内网地址
+
+  - service_name: "internal-api"
+    target_address: "tcp://10.0.0.5:8080"
+
+#  Consumer 配置段
+# 定义此客户端作为服务客户端要订阅和映射的远程服务
+consume:
+  - name: "access-corp-db" # 本地映射的友好名称，仅用于本地标识
+    local_address: "tcp://127.0.0.1:13306" # 映射到本地的地址和端口
+    remote_peer_id: "provider-corp-main" # 目标 Provider 的 PeerID
+    remote_service_name: "prod-mysql" # 希望连接的远程服务名
