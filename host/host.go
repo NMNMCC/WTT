@@ -14,17 +14,25 @@ import (
 )
 
 func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol common.NetProtocol) <-chan error {
-	slog.Info("host running")
-
+	slog.Info("starting host", "id", id, "server", signalingAddr)
 	ec := make(chan error)
 
 	go func() {
 		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("host context cancelled")
+				ec <- ctx.Err()
+				return
+			default:
+			}
+
+			slog.Info("waiting for new peer connection")
+
 			pcCfg := webrtc.Configuration{}
-			slog.Debug("creating peer connection")
 			pc, err := answerer.A_CreatePeerConnection(pcCfg)
 			if err != nil {
-				slog.Error("create peer connection error", "err", err)
+				slog.Error("failed to create peer connection", "err", err)
 				ec <- err
 				return
 			}
@@ -37,7 +45,7 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 
 			hc := resty.New().SetBaseURL(signalingAddr)
 			if err := rtc.RegisterHost(hc, id); err != nil {
-				slog.Error("register host error", "err", err)
+				slog.Error("failed to register host", "err", err)
 				ec <- err
 				return
 			}
@@ -45,7 +53,7 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 			slog.Debug("waiting for offer")
 			offer, err := rtc.ReceiveRTCEvent(hc, common.RTCOfferType, id)
 			if err != nil {
-				slog.Error("receive offer error", "err", err)
+				slog.Error("failed to receive offer", "err", err)
 				ec <- err
 				return
 			}
@@ -53,7 +61,7 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 
 			slog.Debug("setting remote description")
 			if err := answerer.B_SetOfferAsRemoteDescription(pc, *offer); err != nil {
-				slog.Error("set remote description error", "err", err)
+				slog.Error("failed to set remote description", "err", err)
 				ec <- err
 				return
 			}
@@ -62,13 +70,13 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 			slog.Debug("creating answer")
 			answer, err := answerer.C_CreateAnswer(pc, answerO)
 			if err != nil {
-				slog.Error("create answer error", "err", err)
+				slog.Error("failed to create answer", "err", err)
 				ec <- err
 				return
 			}
 			slog.Debug("setting local description")
 			if err := answerer.D_SetAnswerAsLocalDescription(pc, *answer); err != nil {
-				slog.Error("set local description error", "err", err)
+				slog.Error("failed to set local description", "err", err)
 				ec <- err
 				return
 			}
@@ -76,14 +84,15 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 			<-webrtc.GatheringCompletePromise(pc)
 			ld := pc.LocalDescription()
 			if ld == nil {
-				slog.Error("local description is nil after gathering")
-				ec <- webrtc.ErrConnectionClosed
+				err := webrtc.ErrConnectionClosed
+				slog.Error("local description is nil", "err", err)
+				ec <- err
 				return
 			}
 
 			slog.Debug("sending answer")
 			if err := rtc.SendRTCEvent(hc, common.RTCAnswerType, id, *ld); err != nil {
-				slog.Error("send answer error", "err", err)
+				slog.Error("failed to send answer", "err", err)
 				ec <- err
 				return
 			}
@@ -92,7 +101,10 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 			select {
 			case dc := <-dcC:
 				opened := make(chan struct{})
-				dc.OnOpen(func() { opened <- struct{}{} })
+				dc.OnOpen(func() {
+					slog.Debug("data channel opened")
+					opened <- struct{}{}
+				})
 
 				slog.Debug("waiting for data channel to open")
 				select {
@@ -104,7 +116,7 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 					case common.TCP:
 						conn, err := net.Dial("tcp", localAddr)
 						if err != nil {
-							slog.Error("host failed to dial local service", "err", err)
+							slog.Error("failed to dial local tcp service", "err", err)
 							pc.Close() // Close the current peer connection
 							continue   // And try to get a new one
 						}
@@ -112,14 +124,13 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 					case common.UDP:
 						conn, err := net.ListenPacket("udp", localAddr)
 						if err != nil {
-							slog.Error("host failed to listen on local udp", "err", err)
+							slog.Error("failed to listen on local udp", "err", err)
 							pc.Close()
 							continue
 						}
 						bridgeErrCh = common.BridgePacket(dc, conn)
 					}
 
-					// Wait for the bridge to finish
 					if err := <-bridgeErrCh; err != nil {
 						slog.Error("bridge finished with error", "err", err)
 					} else {
@@ -127,13 +138,14 @@ func Run(ctx context.Context, id, signalingAddr, localAddr string, protocol comm
 					}
 
 				case <-ctx.Done():
+					slog.Info("host context cancelled during bridge")
 					ec <- ctx.Err()
 				}
 			case <-ctx.Done():
+				slog.Info("host context cancelled waiting for dc")
 				ec <- ctx.Err()
 			}
 
-			// The connection is done, close the peer connection before looping again.
 			if err := pc.Close(); err != nil {
 				slog.Error("failed to close peer connection", "err", err)
 			}

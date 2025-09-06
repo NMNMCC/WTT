@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"log/slog"
-	"os"
 	"wtt/client"
 	"wtt/common"
 )
@@ -16,11 +15,6 @@ type ClientCmd struct {
 }
 
 func (c *ClientCmd) Run() error {
-	var logLevel slog.Level
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: logLevel,
-	})))
-
 	if c.Protocol != "tcp" && c.Protocol != "udp" {
 		slog.Error("unsupported protocol", "protocol", c.Protocol)
 		return nil

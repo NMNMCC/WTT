@@ -18,9 +18,11 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 	ec := make(chan error)
 
 	go func() {
+		slog.Info("starting client", "server", serverAddr, "hostID", hostID)
 		pcCfg := webrtc.Configuration{}
 		pc, err := offerer.A_CreatePeerConnection(pcCfg)
 		if err != nil {
+			slog.Error("failed to create peer connection", "err", err)
 			ec <- err
 			return
 		}
@@ -28,28 +30,35 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 
 		id, err := uuid.NewRandom()
 		if err != nil {
+			slog.Error("failed to create random id", "err", err)
 			ec <- err
 			return
 		}
 		dc, err := offerer.B_CreateDataChannel(pc, id.String())
 		if err != nil {
+			slog.Error("failed to create data channel", "err", err)
 			ec <- err
 			return
 		}
 		defer dc.Close()
 
 		dcOpen := make(chan struct{}, 1)
-		dc.OnOpen(func() { dcOpen <- struct{}{} })
+		dc.OnOpen(func() {
+			slog.Debug("data channel opened")
+			dcOpen <- struct{}{}
+		})
 
 		ofCfg := webrtc.OfferOptions{}
 		of, err := offerer.C_CreateOffer(pc, ofCfg)
 		if err != nil {
+			slog.Error("failed to create offer", "err", err)
 			ec <- err
 			return
 		}
 
 		slog.Debug("setting local description")
 		if err := offerer.D_SetOfferAsLocalDescription(pc, *of); err != nil {
+			slog.Error("failed to set local description", "err", err)
 			ec <- err
 			return
 		}
@@ -57,7 +66,9 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 		<-webrtc.GatheringCompletePromise(pc)
 		ld := pc.LocalDescription()
 		if ld == nil {
-			ec <- webrtc.ErrConnectionClosed
+			err := webrtc.ErrConnectionClosed
+			slog.Error("local description is nil", "err", err)
+			ec <- err
 			return
 		}
 
@@ -65,6 +76,7 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 
 		slog.Debug("sending offer")
 		if err := rtc.SendRTCEvent(hc, common.RTCOfferType, hostID, *ld); err != nil {
+			slog.Error("failed to send offer", "err", err)
 			ec <- err
 			return
 		}
@@ -72,11 +84,13 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 		slog.Debug("waiting for answer")
 		answer, err := rtc.ReceiveRTCEvent(hc, common.RTCAnswerType, hostID)
 		if err != nil {
+			slog.Error("failed to receive answer", "err", err)
 			ec <- err
 			return
 		}
 		slog.Debug("setting remote description")
 		if err := offerer.E_SetAnswerAsRemoteDescription(pc, *answer); err != nil {
+			slog.Error("failed to set remote description", "err", err)
 			ec <- err
 			return
 		}
@@ -90,7 +104,9 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 			case common.TCP:
 				l, err := net.Listen("tcp", localAddr)
 				if err != nil {
-					ec <- fmt.Errorf("client failed to listen on local port: %w", err)
+					err = fmt.Errorf("client failed to listen on local port: %w", err)
+					slog.Error("tcp listen error", "err", err)
+					ec <- err
 					return
 				}
 				defer l.Close()
@@ -102,7 +118,9 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 				if err != nil {
 					// if context is cancelled, this is expected
 					if ctx.Err() == nil {
-						ec <- fmt.Errorf("client failed to accept connection: %w", err)
+						err = fmt.Errorf("client failed to accept connection: %w", err)
+						slog.Error("tcp accept error", "err", err)
+						ec <- err
 					}
 					return
 				}
@@ -122,7 +140,9 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 				// though a real-world scenario might need more sophisticated handling.
 				conn, err := net.ListenPacket("udp", localAddr)
 				if err != nil {
-					ec <- fmt.Errorf("client failed to listen on local udp: %w", err)
+					err = fmt.Errorf("client failed to listen on local udp: %w", err)
+					slog.Error("udp listen error", "err", err)
+					ec <- err
 					return
 				}
 				bridgeErrCh := common.BridgePacket(dc, conn)
@@ -135,6 +155,7 @@ func Run(ctx context.Context, serverAddr, hostID, localAddr string, protocol com
 			}
 			return
 		case <-ctx.Done():
+			slog.Info("client context cancelled")
 			ec <- ctx.Err()
 			return
 		}
