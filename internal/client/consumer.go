@@ -16,8 +16,7 @@ import (
 )
 
 type ConsumerConfig struct {
-	ID    string
-	Token string
+	ID string
 
 	Type   string
 	Input  string

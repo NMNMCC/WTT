@@ -14,8 +14,7 @@ import (
 )
 
 type ServiceConfig struct {
-	ID    string
-	Token string
+	ID string
 
 	Type   string
 	Output string
