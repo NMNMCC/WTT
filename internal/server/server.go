@@ -85,12 +85,17 @@ func (s *Server) Start(ctx context.Context) error {
 
 			s.PeerMap[id] = peer
 
+			defer func() {
+				delete(s.PeerMap, id)
+				conn.Close(websocket.StatusNormalClosure, "")
+			}()
+
 			for {
 				type_, msg, err := conn.Read(ctx)
 				if err != nil {
 					ne := errors.Join(err, errors.New("failed to read websocket message"))
 					s.ErrorChannel <- ne
-					continue
+					break
 				}
 				if type_ != websocket.MessageText {
 					continue
