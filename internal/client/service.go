@@ -56,6 +56,7 @@ type Service struct {
 
 type ServiceInterface interface {
 	Serve(ctx context.Context)
+	Shutdown(ctx context.Context) error
 
 	Register(ctx context.Context) error
 	AnswerOK(ctx context.Context, id string, sdp webrtc.SessionDescription) error
@@ -96,6 +97,12 @@ func (s *Service) Register(ctx context.Context) error {
 
 func (s *Service) Serve(ctx context.Context) {
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		type_, msg, err := s.ServerConn.Read(ctx)
 		if err != nil {
 			s.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to receive service message"))
@@ -147,6 +154,18 @@ func (s *Service) Serve(ctx context.Context) {
 			continue
 		}
 	}
+}
+
+func (s *Service) Shutdown(ctx context.Context) error {
+	for _, peer := range s.InputMap {
+		if err := peer.Conn.Close(); err != nil {
+			return err
+		}
+	}
+	if err := s.ServerConn.Close(websocket.StatusNormalClosure, ""); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Service) AnswerOK(ctx context.Context, id string, sdp webrtc.SessionDescription) error {

@@ -34,7 +34,10 @@ func main() {
 		if err := s.Register(ctx); err != nil {
 			log.Fatalf("failed to register service: %v", err)
 		}
-		s.Serve(ctx)
+		go s.Serve(ctx)
+
+		<-ctx.Done()
+		s.Shutdown(context.Background())
 	case "consumer":
 		cfg := client.ConsumerConfig{
 			ID:       ui.Cli.Consumer.ID,
@@ -52,7 +55,10 @@ func main() {
 		if err := c.Connect(ctx, ui.Cli.Consumer.ServiceID); err != nil {
 			log.Fatalf("failed to connect to service: %v", err)
 		}
-		c.Serve(ctx)
+		go c.Serve(ctx)
+
+		<-ctx.Done()
+		c.Shutdown(context.Background())
 	case "server":
 		cfg := server.ServerConfig{
 			Endpoint: ui.Cli.Server.Endpoint,

@@ -44,10 +44,10 @@ type Consumer struct {
 
 type ConsumerInterface interface {
 	Serve(ctx context.Context)
+	Shutdown(ctx context.Context) error
 
 	Register(ctx context.Context) error
 	Connect(ctx context.Context, sid string) error
-	Close(ctx context.Context) error
 }
 
 func NewConsumer(cfg ConsumerConfig) (*Consumer, error) {
@@ -100,7 +100,7 @@ func (c *Consumer) Connect(ctx context.Context, sid string) error {
 	})
 
 	dc.OnClose(func() {
-		c.Close(ctx)
+		c.Shutdown(ctx)
 	})
 
 	pc.OnICECandidate(func(i *webrtc.ICECandidate) {
@@ -167,7 +167,7 @@ func (c *Consumer) Connect(ctx context.Context, sid string) error {
 	return nil
 }
 
-func (c *Consumer) Close(ctx context.Context) error {
+func (c *Consumer) Shutdown(ctx context.Context) error {
 	if c.DataCh != nil {
 		c.DataCh.Close()
 		c.DataCh = nil
@@ -185,6 +185,12 @@ func (c *Consumer) Close(ctx context.Context) error {
 
 func (c *Consumer) Serve(ctx context.Context) {
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		type_, msg, err := c.ServerConn.Read(ctx)
 		if err != nil {
 			c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to receive service message"))
@@ -219,7 +225,7 @@ func (c *Consumer) Serve(ctx context.Context) {
 				continue
 			}
 			c.ErrorChannel <- fmt.Errorf("connection rejected by peer: %s", ans.Reason)
-			c.Close(ctx)
+			c.Shutdown(ctx)
 		case typ.EnvelopeTypeICECandidate:
 			var can typ.ICECandidate
 			if err := json.Unmarshal(evl.Payload, &can); err != nil {
