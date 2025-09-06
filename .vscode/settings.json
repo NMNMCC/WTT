@@ -1,6 +1,12 @@
 {
     "cSpell.words": [
         "Fyne",
-        "webrtc"
+        "github",
+        "nanomsg",
+        "reqrep",
+        "RTCICE",
+        "unmarshal",
+        "webrtc",
+        "xreq"
     ]
 }
