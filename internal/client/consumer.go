@@ -44,10 +44,11 @@ type Consumer struct {
 }
 
 type ConsumerInterface interface {
+	Serve(ctx context.Context)
+
 	Register(ctx context.Context) error
 	Connect(ctx context.Context, sid string) error
 	Close(ctx context.Context) error
-	Serve(ctx context.Context)
 }
 
 func NewConsumer(cfg ConsumerConfig) (*Consumer, error) {
@@ -177,7 +178,7 @@ func (c *Consumer) Close(ctx context.Context) error {
 		c.PeerConn = nil
 	}
 	if c.ServerConn != nil {
-		c.ServerConn.Close()
+		c.ServerConn.Close(1000, "user requested")
 		c.ServerConn = nil
 	}
 	return nil
@@ -247,17 +248,32 @@ func listenAndBridge(ctx context.Context, network, address string, dc *webrtc.Da
 	}
 	defer l.Close()
 
+	go func() {
+		<-ctx.Done()
+		l.Close()
+	}()
+
 	log.Printf("listening on %s:%s", network, address)
 
 	for {
 		conn, err := l.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				log.Printf("listener closed")
+				break
+			}
 			log.Printf("failed to accept connection: %v", err)
 			continue
 		}
+
 		go func(c net.Conn) {
 			log.Printf("accepted connection from %s", c.RemoteAddr())
 			defer c.Close()
+
+			go func() {
+				<-ctx.Done()
+				c.Close()
+			}()
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 				if _, err := c.Write(msg.Data); err != nil {
@@ -267,6 +283,13 @@ func listenAndBridge(ctx context.Context, network, address string, dc *webrtc.Da
 
 			buf := make([]byte, 1500)
 			for {
+				select {
+				case <-ctx.Done():
+					log.Printf("connection from %s closed by context", c.RemoteAddr())
+					return
+				default:
+				}
+
 				n, err := c.Read(buf)
 				if err != nil {
 					if err != io.EOF {

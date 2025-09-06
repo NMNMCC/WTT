@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"wtt/internal/typ"
 
-	"github.com/IBM/fp-go/array"
 	"github.com/coder/websocket"
 	"github.com/pion/webrtc/v4"
 )
@@ -24,9 +23,14 @@ type ServiceConfig struct {
 	Endpoint string
 }
 
+type Peer struct {
+	Conn        *webrtc.PeerConnection
+	DataChannel *webrtc.DataChannel
+}
+
 type ServiceState struct {
-	Status ServiceStatus
-	Inputs []*webrtc.DataChannel
+	Status   ServiceStatus
+	InputMap map[string]*Peer
 
 	ServerConn *websocket.Conn
 }
@@ -44,7 +48,7 @@ type Service struct {
 	*ServiceState
 
 	// OK "" | NO <reason>
-	OnOffer func(offer *typ.RTCOffer) (reason string)
+	HandleOffer func(offer *typ.RTCOffer) (reason string)
 
 	ErrorChannel chan error
 
@@ -63,8 +67,8 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	return &Service{
 		ServiceConfig: &cfg,
 		ServiceState: &ServiceState{
-			Status: ServiceStatusPending,
-			Inputs: make([]*webrtc.DataChannel, 0),
+			Status:   ServiceStatusPending,
+			InputMap: make(map[string]*Peer),
 		},
 		ErrorChannel: make(chan error),
 	}, nil
@@ -117,16 +121,27 @@ func (s *Service) Serve(ctx context.Context) {
 				continue
 			}
 
-			if s.OnOffer == nil {
+			if s.HandleOffer == nil {
 				s.ErrorChannel <- fmt.Errorf("no OnOffer handler registered")
 				continue
 			}
 
-			reason := s.OnOffer(&offer)
+			reason := s.HandleOffer(&offer)
 			if reason == "" {
 				s.AnswerOK(ctx, evl.ID.ConsumerID, offer.SessionDescription)
 			} else {
 				s.AnswerNO(ctx, evl.ID.ConsumerID, reason)
+			}
+		case typ.EnvelopeTypeICECandidate:
+			var can typ.ICECandidate
+			if err := json.Unmarshal(evl.Payload, &can); err != nil {
+				s.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to unmarshal ICE candidate"))
+				continue
+			}
+
+			if err := s.InputMap[evl.ConsumerID].Conn.AddICECandidate(can.Candidate.ToJSON()); err != nil {
+				s.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to add ICE candidate"))
+				continue
 			}
 		default:
 			s.ErrorChannel <- fmt.Errorf("unknown service message type: %s", evl.Type)
@@ -152,16 +167,17 @@ func (s *Service) AnswerOK(ctx context.Context, id string, sdp webrtc.SessionDes
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		dc.OnOpen(func() {
-			s.Inputs = append(s.Inputs, dc)
+			s.InputMap[id] = &Peer{
+				Conn:        pc,
+				DataChannel: dc,
+			}
 			s.Status = ServiceStatusActive
 
 			bridge(ctx, s.Type, s.Output, dc)
 		})
 
 		dc.OnClose(func() {
-			s.Inputs = array.Filter(func(i *webrtc.DataChannel) bool {
-				return i != dc
-			})(s.Inputs)
+			delete(s.InputMap, id)
 		})
 	})
 
@@ -222,7 +238,6 @@ func (s *Service) AnswerOK(ctx context.Context, id string, sdp webrtc.SessionDes
 
 func (s *Service) AnswerNO(ctx context.Context, id, reason string) error {
 	body, err := json.Marshal(typ.RTCAnswerNO{
-
 		Reason: reason,
 	})
 	if err != nil {
@@ -278,5 +293,9 @@ func bridge(ctx context.Context, network, endpoint string, dc *webrtc.DataChanne
 	})
 
 	<-ctx.Done()
+
+	dc.Close()
+	conn.Close()
+
 	return nil
 }
