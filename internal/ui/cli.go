@@ -1,6 +1,8 @@
 package ui
 
 var Cli struct {
+	LogLevel string `help:"log level" enum:"debug,info,warn,error" default:"info"`
+
 	Service struct {
 		ID       string `help:"unique service id" required:""`
 		Endpoint string `help:"service endpoint" required:""`

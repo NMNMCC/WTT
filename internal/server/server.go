@@ -3,7 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"log/slog"
 	"net/http"
 	"slices"
 	"wtt/internal/typ"
@@ -30,6 +30,7 @@ type Server struct {
 	*ServerState
 
 	ErrorChannel chan error
+	log          *slog.Logger
 
 	ServerInterface
 }
@@ -40,41 +41,45 @@ type ServerInterface interface {
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
-	return &Server{
+	s := &Server{
 		ServerConfig: &cfg,
 		ServerState: &ServerState{
 			PeerMap: make(map[string]*Peer),
 		},
 		ErrorChannel: make(chan error),
-	}, nil
+		log: slog.With(
+			slog.String("component", "server"),
+		),
+	}
+	s.log.Info("server created")
+	return s, nil
 }
 
 func (s *Server) Start(ctx context.Context) error {
 	s.Server = &http.Server{
 		Addr: s.Endpoint,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log := s.log
 			id := r.Header.Get("ID")
 			if id == "" || s.PeerMap[id] != nil {
-				ne := errors.New("invalid or duplicate ID header")
-				s.ErrorChannel <- ne
+				log.Error("invalid or duplicate ID header", "id", id)
 				return
 			}
+			log = log.With(slog.String("peer_id", id))
 
 			type_ := r.Header.Get("Type")
 			if type_ == "" {
-				ne := errors.New("missing Type header")
-				s.ErrorChannel <- ne
+				log.Error("missing Type header")
 				return
 			} else if !slices.Contains([]typ.PeerType{typ.PeerTypeService, typ.PeerTypeConsumer}, typ.PeerType(type_)) {
-				ne := errors.New("invalid Type header")
-				s.ErrorChannel <- ne
+				log.Error("invalid Type header", "type", type_)
 				return
 			}
+			log = log.With(slog.String("peer_type", type_))
 
 			conn, err := websocket.Accept(w, r, nil)
 			if err != nil {
-				ne := errors.Join(err, errors.New("failed to accept websocket connection"))
-				s.ErrorChannel <- ne
+				log.Error("failed to accept websocket connection", "err", err)
 				return
 			}
 
@@ -84,17 +89,18 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 
 			s.PeerMap[id] = peer
+			log.Info("peer connected")
 
 			defer func() {
 				delete(s.PeerMap, id)
 				conn.Close(websocket.StatusNormalClosure, "")
+				log.Info("peer disconnected")
 			}()
 
 			for {
 				type_, msg, err := conn.Read(ctx)
 				if err != nil {
-					ne := errors.Join(err, errors.New("failed to read websocket message"))
-					s.ErrorChannel <- ne
+					log.Error("failed to read websocket message", "err", err)
 					break
 				}
 				if type_ != websocket.MessageText {
@@ -116,25 +122,35 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.log.Info("shutting down server")
 	if s.Server != nil {
 		return s.Server.Shutdown(ctx)
 	}
+	s.log.Info("server shut down")
 	return nil
 }
 
 func (s *Server) Router(ctx context.Context, peer *Peer, msg json.RawMessage) {
 	var evl typ.Envelope
 	if err := json.Unmarshal(msg, &evl); err != nil {
-		s.ErrorChannel <- errors.Join(err, errors.New("failed to unmarshal websocket message"))
+		s.log.Error("failed to unmarshal websocket message", "err", err)
 		return
 	}
+	log := s.log.With(
+		slog.String("service_id", evl.ServiceID),
+		slog.String("consumer_id", evl.ConsumerID),
+		slog.String("type", string(evl.Type)),
+	)
+	log.Debug("routing message")
 	service := s.PeerMap[evl.ServiceID]
 	if service == nil || service.Type != typ.PeerTypeService {
+		log.Warn("service not registered")
 		peer.Conn.Write(ctx, websocket.MessageText, []byte("service not registered"))
 		return
 	}
 	consumer := s.PeerMap[evl.ConsumerID]
 	if consumer == nil || consumer.Type != typ.PeerTypeConsumer {
+		log.Warn("consumer not registered")
 		peer.Conn.Write(ctx, websocket.MessageText, []byte("consumer not registered"))
 		return
 	}
@@ -149,6 +165,6 @@ func (s *Server) Router(ctx context.Context, peer *Peer, msg json.RawMessage) {
 	case typ.EnvelopeTypeICECandidate:
 		s.HandleICECandidate(ctx, peer, service, consumer, msg)
 	default:
-		s.ErrorChannel <- errors.New("unknown envelope type")
+		log.Error("unknown envelope type")
 	}
 }

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"wtt/internal/typ"
@@ -38,6 +38,7 @@ type Consumer struct {
 	*ConsumerState
 
 	ErrorChannel chan error
+	log          *slog.Logger
 
 	ConsumerInterface
 }
@@ -51,13 +52,19 @@ type ConsumerInterface interface {
 }
 
 func NewConsumer(cfg ConsumerConfig) (*Consumer, error) {
-	return &Consumer{
+	c := &Consumer{
 		ConsumerConfig: &cfg,
 		ConsumerState: &ConsumerState{
 			Status: ServiceStatusPending,
 		},
 		ErrorChannel: make(chan error),
-	}, nil
+		log: slog.With(
+			slog.String("component", "consumer"),
+			slog.String("id", cfg.ID),
+		),
+	}
+	c.log.Info("consumer created")
+	return c, nil
 }
 
 func (c *Consumer) Register(ctx context.Context) error {
@@ -65,6 +72,7 @@ func (c *Consumer) Register(ctx context.Context) error {
 	header.Set("ID", c.ID)
 	header.Set("Type", string(typ.PeerTypeConsumer))
 
+	c.log.Info("registering consumer")
 	conn, resp, err := websocket.Dial(ctx, c.ConsumerConfig.Endpoint, &websocket.DialOptions{
 		HTTPHeader: header,
 	})
@@ -74,6 +82,7 @@ func (c *Consumer) Register(ctx context.Context) error {
 	if resp.StatusCode != 101 {
 		return fmt.Errorf("failed to connect to server: %s", resp.Body)
 	}
+	c.log.Info("consumer registered")
 
 	c.ServerConn = conn
 	c.Status = ServiceStatusActive
@@ -95,8 +104,9 @@ func (c *Consumer) Connect(ctx context.Context, sid string) error {
 	c.DataCh = dc
 
 	dc.OnOpen(func() {
+		c.log.Info("data channel opened")
 		c.Status = ServiceStatusActive
-		go listenAndBridge(ctx, c.Type, c.Input, dc)
+		go listenAndBridge(ctx, c.Type, c.Input, dc, c.log)
 	})
 
 	dc.OnClose(func() {
@@ -111,7 +121,7 @@ func (c *Consumer) Connect(ctx context.Context, sid string) error {
 			Candidate: *i,
 		})
 		if err != nil {
-			c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to marshal ICE candidate"))
+			c.log.Error("failed to marshal ICE candidate", "err", err)
 			return
 		}
 		evl, err := json.Marshal(typ.Envelope{
@@ -123,12 +133,12 @@ func (c *Consumer) Connect(ctx context.Context, sid string) error {
 			Payload: payload,
 		})
 		if err != nil {
-			c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to marshal ICE candidate envelope"))
+			c.log.Error("failed to marshal ICE candidate envelope", "err", err)
 			return
 		}
 
 		if err := c.ServerConn.Write(ctx, websocket.MessageText, evl); err != nil {
-			c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to send ICE candidate"))
+			c.log.Error("failed to send ICE candidate", "err", err)
 			return
 		}
 	})
@@ -168,6 +178,7 @@ func (c *Consumer) Connect(ctx context.Context, sid string) error {
 }
 
 func (c *Consumer) Shutdown(ctx context.Context) error {
+	c.log.Info("shutting down consumer")
 	if c.DataCh != nil {
 		c.DataCh.Close()
 		c.DataCh = nil
@@ -180,6 +191,7 @@ func (c *Consumer) Shutdown(ctx context.Context) error {
 		c.ServerConn.Close(1000, "user requested")
 		c.ServerConn = nil
 	}
+	c.log.Info("consumer shut down")
 	return nil
 }
 
@@ -193,51 +205,52 @@ func (c *Consumer) Serve(ctx context.Context) {
 
 		type_, msg, err := c.ServerConn.Read(ctx)
 		if err != nil {
-			c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to receive service message"))
+			c.log.Error("failed to receive service message", "err", err)
 			continue
 		}
 		if type_ != websocket.MessageText {
-			c.ErrorChannel <- fmt.Errorf("invalid service message type")
+			c.log.Error("invalid service message type")
 			continue
 		}
 
 		var evl typ.Envelope
 		if err := json.Unmarshal(msg, &evl); err != nil {
-			c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to unmarshal service message"))
+			c.log.Error("failed to unmarshal service message", "err", err)
 			continue
 		}
+		c.log.Debug("received service message", "type", evl.Type)
 
 		switch evl.Type {
 		case typ.EnvelopeTypeRTCAnswerOK:
 			var ans typ.RTCAnswerOK
 			if err := json.Unmarshal(evl.Payload, &ans); err != nil {
-				c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to unmarshal RTC answer OK"))
+				c.log.Error("failed to unmarshal RTC answer OK", "err", err)
 				continue
 			}
 			if err := c.PeerConn.SetRemoteDescription(ans.SessionDescription); err != nil {
-				c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to set remote description"))
+				c.log.Error("failed to set remote description", "err", err)
 				continue
 			}
 		case typ.EnvelopeTypeRTCAnswerNO:
 			var ans typ.RTCAnswerNO
 			if err := json.Unmarshal(evl.Payload, &ans); err != nil {
-				c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to unmarshal RTC answer NO"))
+				c.log.Error("failed to unmarshal RTC answer NO", "err", err)
 				continue
 			}
-			c.ErrorChannel <- fmt.Errorf("connection rejected by peer: %s", ans.Reason)
+			c.log.Error("connection rejected by peer", "reason", ans.Reason)
 			c.Shutdown(ctx)
 		case typ.EnvelopeTypeICECandidate:
 			var can typ.ICECandidate
 			if err := json.Unmarshal(evl.Payload, &can); err != nil {
-				c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to unmarshal ICE candidate"))
+				c.log.Error("failed to unmarshal ICE candidate", "err", err)
 				continue
 			}
 			if err := c.PeerConn.AddICECandidate(can.Candidate.ToJSON()); err != nil {
-				c.ErrorChannel <- errors.Join(err, fmt.Errorf("failed to add ICE candidate"))
+				c.log.Error("failed to add ICE candidate", "err", err)
 				continue
 			}
 		default:
-			c.ErrorChannel <- fmt.Errorf("unknown service message type: %s", evl.Type)
+			c.log.Error("unknown service message type", "type", evl.Type)
 			continue
 		}
 	}
@@ -245,10 +258,11 @@ func (c *Consumer) Serve(ctx context.Context) {
 
 var _ ConsumerInterface = (*Consumer)(nil)
 
-func listenAndBridge(ctx context.Context, network, address string, dc *webrtc.DataChannel) {
+func listenAndBridge(ctx context.Context, network, address string, dc *webrtc.DataChannel, log *slog.Logger) {
+	log = log.With(slog.String("network", network), slog.String("address", address))
 	l, err := net.Listen(network, address)
 	if err != nil {
-		log.Printf("failed to listen on %s:%s: %v", network, address, err)
+		log.Error("failed to listen", "err", err)
 		return
 	}
 	defer l.Close()
@@ -258,21 +272,22 @@ func listenAndBridge(ctx context.Context, network, address string, dc *webrtc.Da
 		l.Close()
 	}()
 
-	log.Printf("listening on %s:%s", network, address)
+	log.Info("listening")
 
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				log.Printf("listener closed")
+				log.Info("listener closed")
 				break
 			}
-			log.Printf("failed to accept connection: %v", err)
+			log.Error("failed to accept connection", "err", err)
 			continue
 		}
 
 		go func(c net.Conn) {
-			log.Printf("accepted connection from %s", c.RemoteAddr())
+			log := log.With(slog.String("remote_addr", c.RemoteAddr().String()))
+			log.Info("accepted connection")
 			defer c.Close()
 
 			go func() {
@@ -282,7 +297,7 @@ func listenAndBridge(ctx context.Context, network, address string, dc *webrtc.Da
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 				if _, err := c.Write(msg.Data); err != nil {
-					log.Printf("failed to write to local conn: %v", err)
+					log.Error("failed to write to local conn", "err", err)
 				}
 			})
 
@@ -290,7 +305,7 @@ func listenAndBridge(ctx context.Context, network, address string, dc *webrtc.Da
 			for {
 				select {
 				case <-ctx.Done():
-					log.Printf("connection from %s closed by context", c.RemoteAddr())
+					log.Info("connection closed by context")
 					return
 				default:
 				}
@@ -298,16 +313,16 @@ func listenAndBridge(ctx context.Context, network, address string, dc *webrtc.Da
 				n, err := c.Read(buf)
 				if err != nil {
 					if err != io.EOF {
-						log.Printf("failed to read from local conn: %v", err)
+						log.Error("failed to read from local conn", "err", err)
 					}
 					break
 				}
 				if err := dc.Send(buf[:n]); err != nil {
-					log.Printf("failed to send to data channel: %v", err)
+					log.Error("failed to send to data channel", "err", err)
 					break
 				}
 			}
-			log.Printf("connection from %s closed", c.RemoteAddr())
+			log.Info("connection closed")
 		}(conn)
 	}
 }
