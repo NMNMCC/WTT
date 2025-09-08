@@ -118,7 +118,7 @@ func (c *Consumer) Connect(ctx context.Context, sid string) error {
 			return
 		}
 		payload, err := json.Marshal(typ.ICECandidate{
-			Candidate: *i,
+			Candidate: i.ToJSON(),
 		})
 		if err != nil {
 			c.log.Error("failed to marshal ICE candidate", "err", err)
@@ -245,7 +245,7 @@ func (c *Consumer) Serve(ctx context.Context) {
 				c.log.Error("failed to unmarshal ICE candidate", "err", err)
 				continue
 			}
-			if err := c.PeerConn.AddICECandidate(can.Candidate.ToJSON()); err != nil {
+			if err := c.PeerConn.AddICECandidate(can.Candidate); err != nil {
 				c.log.Error("failed to add ICE candidate", "err", err)
 				continue
 			}

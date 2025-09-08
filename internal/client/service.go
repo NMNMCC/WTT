@@ -11,6 +11,7 @@ import (
 	"wtt/internal/typ"
 
 	"github.com/coder/websocket"
+	"github.com/cornelk/hashmap"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -30,7 +31,7 @@ type Peer struct {
 
 type ServiceState struct {
 	Status   ServiceStatus
-	InputMap map[string]*Peer
+	InputMap *hashmap.Map[string, *Peer]
 
 	ServerConn *websocket.Conn
 }
@@ -70,7 +71,10 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		ServiceConfig: &cfg,
 		ServiceState: &ServiceState{
 			Status:   ServiceStatusPending,
-			InputMap: make(map[string]*Peer),
+			InputMap: hashmap.New[string, *Peer](),
+		},
+		HandleOffer: func(offer *typ.RTCOffer) (reason string) {
+			return ""
 		},
 		ErrorChannel: make(chan error),
 		log: slog.With(
@@ -118,7 +122,7 @@ func (s *Service) Serve(ctx context.Context) {
 			s.log.Error("failed to receive service message", "err", err)
 			continue
 		}
-		if type_ != websocket.MessageBinary {
+		if type_ != websocket.MessageText {
 			s.log.Error("invalid service message type")
 			continue
 		}
@@ -156,7 +160,13 @@ func (s *Service) Serve(ctx context.Context) {
 				continue
 			}
 
-			if err := s.InputMap[evl.ConsumerID].Conn.AddICECandidate(can.Candidate.ToJSON()); err != nil {
+			consumer, ok := s.InputMap.Get(evl.ConsumerID)
+			if !ok {
+				s.log.Error("unknown consumer", "id", evl.ConsumerID)
+				continue
+			}
+
+			if err := consumer.Conn.AddICECandidate(can.Candidate); err != nil {
 				s.log.Error("failed to add ICE candidate", "err", err)
 				continue
 			}
@@ -169,12 +179,13 @@ func (s *Service) Serve(ctx context.Context) {
 
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.log.Info("shutting down service")
-	for _, peer := range s.InputMap {
-		if err := peer.Conn.Close(); err != nil {
+	s.InputMap.Range(func(k string, v *Peer) bool {
+		if err := v.Conn.Close(); err != nil {
 			s.log.Error("failed to close peer connection", "err", err)
-			return err
+			return false
 		}
-	}
+		return true
+	})
 	if err := s.ServerConn.Close(websocket.StatusNormalClosure, ""); err != nil {
 		s.log.Error("failed to close server connection", "err", err)
 		return err
@@ -193,6 +204,8 @@ func (s *Service) AnswerOK(ctx context.Context, id string, sdp webrtc.SessionDes
 
 	pc.SetRemoteDescription(sdp)
 
+	s.InputMap.Set(id, &Peer{Conn: pc})
+
 	ans, err := pc.CreateAnswer(nil)
 	if err != nil {
 		return errors.Join(err, fmt.Errorf("failed to create answer"))
@@ -203,9 +216,11 @@ func (s *Service) AnswerOK(ctx context.Context, id string, sdp webrtc.SessionDes
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		log.Info("data channel opened")
 		dc.OnOpen(func() {
-			s.InputMap[id] = &Peer{
-				Conn:        pc,
-				DataChannel: dc,
+			if peer, ok := s.InputMap.Get(id); ok && peer != nil {
+				peer.DataChannel = dc
+				s.InputMap.Set(id, peer)
+			} else {
+				s.InputMap.Set(id, &Peer{Conn: pc, DataChannel: dc})
 			}
 			s.Status = ServiceStatusActive
 
@@ -214,7 +229,7 @@ func (s *Service) AnswerOK(ctx context.Context, id string, sdp webrtc.SessionDes
 
 		dc.OnClose(func() {
 			log.Info("data channel closed")
-			delete(s.InputMap, id)
+			s.InputMap.Del(id)
 		})
 	})
 
@@ -244,8 +259,11 @@ func (s *Service) AnswerOK(ctx context.Context, id string, sdp webrtc.SessionDes
 	}
 
 	pc.OnICECandidate(func(i *webrtc.ICECandidate) {
+		if i == nil {
+			return
+		}
 		payload, err := json.Marshal(typ.ICECandidate{
-			Candidate: *i,
+			Candidate: i.ToJSON(),
 		})
 		if err != nil {
 			log.Error("failed to marshal ICE candidate", "err", err)

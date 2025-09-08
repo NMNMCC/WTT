@@ -46,5 +46,5 @@ type RTCAnswerNO struct {
 }
 
 type ICECandidate struct {
-	Candidate webrtc.ICECandidate
+	Candidate webrtc.ICECandidateInit
 }

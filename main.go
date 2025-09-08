@@ -9,6 +9,7 @@ import (
 	"wtt/internal/client"
 	"wtt/internal/log"
 	"wtt/internal/server"
+	"wtt/internal/typ"
 	"wtt/internal/ui"
 
 	"github.com/alecthomas/kong"
@@ -30,6 +31,9 @@ func main() {
 			Endpoint: ui.Cli.Service.Endpoint,
 		}
 		s, err := client.NewService(cfg)
+		s.HandleOffer = func(offer *typ.RTCOffer) (reason string) {
+			return ""
+		}
 		if err != nil {
 			slog.Error("failed to create service", "err", err)
 			os.Exit(1)

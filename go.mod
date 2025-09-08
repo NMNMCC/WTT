@@ -7,6 +7,8 @@ require (
 	github.com/pion/webrtc/v4 v4.1.4
 )
 
+require github.com/cornelk/hashmap v1.0.8 // indirect
+
 require (
 	github.com/alecthomas/kong v1.12.1
 	github.com/google/uuid v1.6.0 // indirect
